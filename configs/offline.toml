@@ -1,0 +1,28 @@
+# Offline smoke run: exercises the whole loop with NO external services.
+# echo decoder + null retrieval + mock world. Proves the harness is up.
+#   uv run pumpkinspice run --config configs/offline.toml
+
+[run]
+decoder   = "echo"
+retrieval = "null"
+world     = "mock"
+prompt    = "default"
+capture   = "jsonl"
+task      = "Reach level 2 by fighting, then rest."
+max_turns = 6
+
+[decoder]
+# The echo decoder replays this scripted action list, then rests.
+script = [
+    { action = "move",  args = { x = 1, y = 0 } },
+    { action = "fight", args = {} },
+    { action = "fight", args = {} },
+    { action = "gather", args = { code = "ash_wood", quantity = 2 } },
+    { action = "rest",  args = {} },
+]
+
+[world]
+character = "hero"
+
+[capture]
+path = "captures/offline.jsonl"

@@ -1,0 +1,139 @@
+[project]
+name = "pumpkinspice"
+version = "0.1.0"
+description = "A microkernel RAG-over-HeroBench harness for baselining LLMs (Benchero 2.0 Agent 2 control)."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Todd Bucy", email = "todd@bucy-medrano.me" }]
+maintainers = [{ name = "Todd Bucy", email = "todd@bucy-medrano.me" }]
+keywords = ["llm", "rag", "benchmark", "herobench", "agent", "evaluation", "pgvector", "microkernel"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = [
+    "httpx>=0.27",
+]
+
+# Optional backends are extras so the offline core installs with no DB drivers.
+[project.optional-dependencies]
+pgvector = ["psycopg[binary]>=3.1", "pgvector>=0.3"]
+arango = ["python-arango>=8.0"]
+web = ["fastapi>=0.115", "uvicorn[standard]>=0.30"]
+mcp = ["mcp>=1.0"]  # the MCP host for the agentic Chat (Phase 3a); optional
+
+[project.urls]
+Homepage = "https://github.com/toddwbucy/pumpkinspice"
+Repository = "https://github.com/toddwbucy/pumpkinspice"
+Issues = "https://github.com/toddwbucy/pumpkinspice/issues"
+
+[project.scripts]
+pumpkinspice = "pumpkinspice.cli:main"
+
+# Dev tooling lives in a PEP 735 dependency group (installed by `uv sync`,
+# excluded from the published wheel).
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "pytest-timeout>=2.3",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pre-commit>=3.8",
+]
+
+# --- Microkernel plugin registry -------------------------------------------
+# Each slot is an entry-point group. The kernel discovers plugins by group +
+# name via importlib.metadata and never imports a concrete backend directly.
+# An out-of-tree plugin (e.g. a future HADES retrieval) just ships its own
+# entry point in this group; if its package is not installed, the kernel
+# cannot load it -- the build-side/runtime airgap as a packaging fact.
+
+[project.entry-points."pumpkinspice.decoder"]
+lmstudio = "pumpkinspice.plugins.decoder_lmstudio:LMStudioDecoder"
+echo = "pumpkinspice.plugins.decoder_echo:EchoDecoder"
+
+[project.entry-points."pumpkinspice.retrieval"]
+null = "pumpkinspice.plugins.retrieval_null:NullRetrieval"
+pgvector = "pumpkinspice.plugins.retrieval_pgvector:PgVectorRetrieval"
+arango = "pumpkinspice.plugins.retrieval_arango:ArangoRetrieval"
+
+[project.entry-points."pumpkinspice.world"]
+herobench = "pumpkinspice.plugins.world_herobench:HeroBenchWorld"
+mock = "pumpkinspice.plugins.world_mock:MockWorld"
+hanoi = "pumpkinspice.plugins.world_hanoi:HanoiWorld"
+
+[project.entry-points."pumpkinspice.prompt"]
+default = "pumpkinspice.plugins.prompt_default:DefaultPromptBuilder"
+plan = "pumpkinspice.plugins.prompt_plan:PlanningPromptBuilder"
+replan = "pumpkinspice.plugins.prompt_replan:ReplanPromptBuilder"
+executor = "pumpkinspice.plugins.prompt_executor:ExecutorPromptBuilder"
+
+[project.entry-points."pumpkinspice.capture"]
+jsonl = "pumpkinspice.plugins.capture_jsonl:JsonlCapture"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pumpkinspice"]
+
+# --- Quality gates ----------------------------------------------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",      # pyflakes + pycodestyle
+    "I",                 # isort
+    "UP",                # pyupgrade
+    "B",                 # bugbear
+    "SIM",               # simplify
+    "C4",                # comprehensions
+    "RUF",               # ruff-specific
+]
+ignore = ["E501"]        # line length handled by the formatter
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+strict = true
+warn_unreachable = true
+pretty = true
+
+[[tool.mypy.overrides]]
+module = ["pgvector.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# python-arango ships types but does not explicitly re-export ArangoClient.
+module = ["arango.*"]
+implicit_reexport = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --cov=pumpkinspice --cov-report=term-missing --cov-fail-under=80"
+# Defensive cap so a wedged test fails fast instead of hanging CI (the suite
+# normally finishes in seconds; nothing legitimate takes anywhere near this).
+timeout = 120
+
+[tool.coverage.run]
+branch = true
+source = ["pumpkinspice"]
+
+[tool.coverage.report]
+exclude_also = [
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "@(abc\\.)?abstractmethod",
+    "if TYPE_CHECKING:",
+]

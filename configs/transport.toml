@@ -1,0 +1,15 @@
+# Transport micro-benchmark (spec section 5). Measures decoder round-trip latency
+# distribution over the LMStudio endpoint (pure /v1/models ping + minimal max_tokens=1
+# decode), to bound and rule out transport as a differentiator.
+#   uv run pumpkinspice transport --config configs/transport.toml
+
+[decoder]
+base_url = "http://localhost:1234"
+model    = "mistral-small-24b-instruct-2501"
+
+[transport]
+iterations = 50
+warmup     = 5
+max_tokens = 1
+prompt     = "ping"
+out        = "captures/transport_lmstudio.json"

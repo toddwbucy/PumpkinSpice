@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    # A wedged test (network wait, deadlock) must fail the job, not hang the
+    # runner for GitHub's 6h default. pytest-timeout also caps each test.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # This job only reads the tree; never persist the token into .git.
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync (core + dev + backends + web + mcp)
+        # mypy strict resolves imports, so every extra whose module ships in
+        # src/ must be installed here (mcp is lazy-imported by web/mcp_host.py).
+        run: uv sync --extra pgvector --extra arango --extra web --extra mcp
+
+      - name: Format check
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Type check
+        run: uv run mypy
+
+      - name: Tests + coverage
+        run: uv run pytest

@@ -1,0 +1,25 @@
+# Live decoder smoke: real LMStudio decoder, but null retrieval + mock world so
+# no DB or HeroBench server is needed. Validates the real decode + parse path.
+#   uv run pumpkinspice run --config configs/live_decoder_smoke.toml
+
+[run]
+decoder   = "lmstudio"
+retrieval = "null"
+world     = "mock"
+prompt    = "default"
+capture   = "jsonl"
+task      = "You are at (0,0), level 1. Move toward a chicken to fight it."
+max_turns = 2
+
+[decoder]
+base_url = "http://localhost:1234"
+model    = "mistral-small-24b-instruct-2501"
+# max_tokens omitted on purpose -> generate until EOS (no artificial output cap),
+# so reasoning models can finish thinking + answer. The 262144 context window is
+# the model-load setting in LMStudio, not this. (For vLLM, set an explicit cap.)
+
+[world]
+character = "hero"
+
+[capture]
+path = "captures/live_decoder_smoke.jsonl"
