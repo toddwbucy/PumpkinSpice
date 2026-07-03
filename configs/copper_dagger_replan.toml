@@ -1,0 +1,36 @@
+# Stage-3 (plan + replan-on-surprise) variant of copper_dagger. IDENTICAL to the
+# Stage 1/2 configs except prompt = "replan": the model commits a plan AND revises it
+# when the world contradicts it (failed actions, discoveries). Compare against
+# copper_dagger (reactive) and copper_dagger_plan (committed, no revision) to isolate
+# the value of adaptivity. The `replans` column in `analyze` counts plan rewrites.
+#   uv run --extra pgvector pumpkinspice sweep -c copper_dagger_replan \
+#       -m "mistral-small-24b-instruct-2501:1024,qwen/qwen3.6-27b" --goal-item copper_dagger
+
+[run]
+decoder   = "lmstudio"
+retrieval = "pgvector"
+world     = "herobench"
+prompt    = "replan"
+capture   = "jsonl"
+task      = "Craft a copper dagger."
+max_turns = 50
+goal_item = "copper_dagger"  # stop the run as soon as the dagger is crafted
+
+[decoder]
+base_url = "http://localhost:1234"
+# model overridden by `sweep`; max_tokens omitted -> unbounded (plan + thinking room).
+
+[retrieval]
+top_k        = 6
+dsn_env      = "PUMPKINSPICE_PG_DSN"
+table        = "kg.belief_nodes"
+relational   = true
+embed_url    = "http://localhost:1234"
+embed_model  = "text-embedding-nomic-embed-text-v1.5"
+
+[world]
+base_url  = "http://127.0.0.1:8000"
+character = "character_1"
+
+[capture]
+path = "captures/copper_dagger_replan.jsonl"

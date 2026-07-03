@@ -1,0 +1,34 @@
+# Fully-real run: live LMStudio decoder + live pgvector retrieval over the seeded
+# encyclopedia + the LIVE HeroBench world (Redis backend on 127.0.0.1:8000).
+# Needs: HeroBench server up, corpus seeded, scoped DSNs loaded (. .env.local).
+#   uv run --extra pgvector pumpkinspice run --config configs/herobench_real.toml
+
+[run]
+decoder   = "lmstudio"
+retrieval = "pgvector"
+world     = "herobench"
+prompt    = "default"
+capture   = "jsonl"
+task      = "You are character_1 at (0,0), level 1. Gather wood: move one step toward an ash tree, then gather."
+max_turns = 50   # HeroBench tasks are long-horizon (navigation is 1 tile/turn); tune per difficulty
+
+[decoder]
+base_url   = "http://localhost:1234"
+model      = "mistral-small-24b-instruct-2501"
+# max_tokens omitted on purpose -> generate until EOS (no artificial output cap),
+# so reasoning models can finish thinking + answer. The 262144 context window is
+# the model-load setting in LMStudio, not this. (For vLLM, set an explicit cap.)
+
+[retrieval]
+top_k       = 5
+dsn_env     = "PUMPKINSPICE_PG_DSN"                        # scoped, read-only
+table       = "kg.belief_nodes"
+embed_url   = "http://localhost:1234"
+embed_model = "text-embedding-nomic-embed-text-v1.5"
+
+[world]
+base_url  = "http://127.0.0.1:8000"
+character = "character_1"
+
+[capture]
+path = "captures/herobench_real.jsonl"
