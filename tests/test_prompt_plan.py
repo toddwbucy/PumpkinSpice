@@ -58,3 +58,12 @@ def test_observe_without_plan_section_keeps_plan_empty() -> None:
     pb = PlanningPromptBuilder({})
     pb.observe('{"action": "rest", "args": {}}')  # no "## Plan" header
     assert pb.plan == ""
+
+
+def test_plan_only_output_still_commits() -> None:
+    """A model that writes ONLY a plan and stops (no action JSON, no following
+    header -- e.g. truncated at max_tokens) must still commit the plan instead
+    of being silently re-asked next turn."""
+    pb = PlanningPromptBuilder({})
+    pb.observe("## Plan\n1. Gather copper_ore.\n2. Smelt copper.")
+    assert "Gather copper_ore" in pb.plan and "Smelt copper" in pb.plan

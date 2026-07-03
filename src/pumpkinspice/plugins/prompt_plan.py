@@ -44,7 +44,9 @@ Do NOT rewrite the plan once committed -- follow it.
 
 # Pull the "## Plan ..." block out of the first output: everything between the Plan
 # header and the next "##" header (e.g. "## Thought") or the start of the action JSON.
-_PLAN_RE = re.compile(r"##\s*Plan\b[ \t]*\n?(.*?)(?:\n##\s|\n*\{)", re.DOTALL | re.IGNORECASE)
+# The terminator alternation includes end-of-string (\Z): a model that writes
+# only a plan and stops (e.g. truncated at max_tokens) must still commit it.
+_PLAN_RE = re.compile(r"##\s*Plan\b[ \t]*\n?(.*?)(?:\n##\s|\n*\{|\Z)", re.DOTALL | re.IGNORECASE)
 
 
 class PlanningPromptBuilder:

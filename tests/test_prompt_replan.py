@@ -70,3 +70,13 @@ def test_replan_metric_counts_changes() -> None:
     # plan set (initial), unchanged, then changed twice = 2 replans
     turns = [turn(0, "A"), turn(1, "A"), turn(2, "B"), turn(3, "C")]
     assert analyze_turns("r", turns).replans == 2
+
+
+def test_plan_only_output_still_commits_and_revises() -> None:
+    """Same terminator edge case as Stage 2: a bare plan with no trailing action
+    or header must commit -- and a bare revision must replace it."""
+    pb = ReplanPromptBuilder({})
+    pb.observe("## Plan\n1. Gather copper_ore.")
+    assert "Gather copper_ore" in pb.plan
+    pb.observe("## Plan\n1. Fight first instead.")
+    assert "Fight first" in pb.plan and "Gather copper_ore" not in pb.plan

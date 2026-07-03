@@ -48,7 +48,9 @@ Revise only when the world has actually contradicted the plan -- do not churn it
 """
 
 # Pull the "## Plan ..." block out of an output (turn 0 or a later revision).
-_PLAN_RE = re.compile(r"##\s*Plan\b[ \t]*\n?(.*?)(?:\n##\s|\n*\{)", re.DOTALL | re.IGNORECASE)
+# The terminator alternation includes end-of-string (\Z): a model that writes
+# only a plan and stops (e.g. truncated at max_tokens) must still commit it.
+_PLAN_RE = re.compile(r"##\s*Plan\b[ \t]*\n?(.*?)(?:\n##\s|\n*\{|\Z)", re.DOTALL | re.IGNORECASE)
 
 
 class ReplanPromptBuilder:
