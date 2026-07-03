@@ -66,3 +66,7 @@ def test_retrieve_maps_rows_and_binds_collection(monkeypatch: pytest.MonkeyPatch
     assert bind["@collection"] == "belief_nodes"
     assert bind["k"] == 2
     assert "APPROX_NEAR" not in str(captured["aql"])  # plain cosine, no native vector index
+    # Cross-backend id parity: the AQL must surface the ORIGINAL node id field
+    # (e.g. "mechanic:crafting_xp"), not the sanitized _key, so arango and
+    # pgvector captures identify the same belief node the same way.
+    assert "doc.id != null ? doc.id : doc._key" in str(captured["aql"])

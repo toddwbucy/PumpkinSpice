@@ -25,6 +25,7 @@ import argparse
 import os
 import secrets
 import sys
+import uuid
 from pathlib import Path
 
 from arango import ArangoClient
@@ -138,12 +139,24 @@ def verify(client, args, agent_pw) -> None:
     agent_db = client.db(args.db, username=args.agent_user, password=agent_pw)
     n = agent_db.collection(args.collection).count()
 
-    # write must be denied
+    # write must be denied -- and only a real permission denial counts. A
+    # duplicate-key or transport error must not masquerade as "denied", so
+    # probe with a unique key and match the server's forbidden response.
+    from arango.exceptions import DocumentInsertError
+
+    probe_key = f"_probe_{uuid.uuid4().hex[:12]}"
     try:
-        agent_db.collection(args.collection).insert({"_key": "_probe", "text": "x"})
-    except Exception:
-        print(f"  ok: write to {args.collection} correctly DENIED")
+        agent_db.collection(args.collection).insert({"_key": probe_key, "text": "x"})
+    except DocumentInsertError as exc:
+        if exc.http_code not in (401, 403):
+            raise AssertionError(
+                f"SECURITY: write probe failed with {exc.http_code} ({exc}), "
+                "not a permission denial -- cannot prove the role is read-only"
+            ) from exc
+        print(f"  ok: write to {args.collection} correctly DENIED (HTTP {exc.http_code})")
     else:
+        # the write went through: remove the probe doc, then fail loudly
+        agent_db.collection(args.collection).delete(probe_key, ignore_missing=True)
         raise AssertionError("SECURITY: read-only user could WRITE!")
 
     # access to another database must be denied (default access = none)

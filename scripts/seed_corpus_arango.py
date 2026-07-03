@@ -72,7 +72,11 @@ def main(argv: list[str] | None = None) -> int:
         for node, vec in zip(batch, vectors, strict=True):
             docs.append(
                 {
+                    # _key charset is restricted, so sanitize -- but keep the
+                    # ORIGINAL id as a field for cross-backend id parity
+                    # (pgvector returns "mechanic:crafting_xp"; so must arango).
                     "_key": node.id.replace(":", "_"),
+                    "id": node.id,
                     "text": node.text,
                     "metadata": node.metadata,
                     "embedding": vec,

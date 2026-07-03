@@ -36,7 +36,7 @@ FOR doc IN @@collection
   LET score = nd == 0 ? 0 : dot / (@nq * nd)
   SORT score DESC
   LIMIT @k
-  RETURN {id: doc._key, text: doc.text, score: score}
+  RETURN {id: doc.id != null ? doc.id : doc._key, text: doc.text, score: score}
 """
 
 
