@@ -1,0 +1,37 @@
+# pgvector "semantic + relational" arm: cosine top-k PLUS schema expansion
+# (recipe -> ingredients -> sources -> locations) from the kg.* relational tables.
+# Needs: HeroBench up, vector corpus + relational tables seeded, .env.local loaded.
+#   uv run --extra pgvector python scripts/seed_corpus.py          # vectors
+#   uv run --extra pgvector python scripts/seed_relational_pg.py   # relational tables
+#   uv run --extra pgvector pumpkinspice run --config configs/pgvector_relational.toml
+
+[run]
+decoder   = "lmstudio"
+retrieval = "pgvector"
+world     = "herobench"
+prompt    = "default"
+capture   = "jsonl"
+task      = "Craft a copper dagger: figure out what it needs and where to get the materials."
+max_turns = 50   # HeroBench tasks are long-horizon (navigation is 1 tile/turn); tune per difficulty
+
+[decoder]
+base_url   = "http://localhost:1234"
+model      = "mistral-small-24b-instruct-2501"
+# max_tokens omitted on purpose -> generate until EOS (no artificial output cap),
+# so reasoning models can finish thinking + answer. The 262144 context window is
+# the model-load setting in LMStudio, not this. (For vLLM, set an explicit cap.)
+
+[retrieval]
+top_k        = 5
+dsn_env      = "PUMPKINSPICE_PG_DSN"          # scoped, read-only
+table        = "kg.belief_nodes"
+relational   = true                            # <- the ablation toggle
+embed_url    = "http://localhost:1234"
+embed_model  = "text-embedding-nomic-embed-text-v1.5"
+
+[world]
+base_url  = "http://127.0.0.1:8000"
+character = "character_1"
+
+[capture]
+path = "captures/pgvector_relational.jsonl"

@@ -1,0 +1,38 @@
+# Real run on the ARANGO retrieval arm: live LMStudio decoder + live ArangoDB
+# cosine retrieval over the seeded encyclopedia + live HeroBench world.
+# Needs: HeroBench up, arango seeded, scoped creds loaded (. .env.local).
+#   uv run --extra arango python scripts/seed_corpus_arango.py   # once, to seed
+#   uv run --extra arango pumpkinspice run --config configs/arango_real.toml
+
+[run]
+decoder   = "lmstudio"
+retrieval = "arango"
+world     = "herobench"
+prompt    = "default"
+capture   = "jsonl"
+task      = "You are character_1 at (0,0), level 1. Gather wood: move one step toward an ash tree, then gather."
+max_turns = 50   # HeroBench tasks are long-horizon (navigation is 1 tile/turn); tune per difficulty
+
+[decoder]
+base_url   = "http://localhost:1234"
+model      = "mistral-small-24b-instruct-2501"
+# max_tokens omitted on purpose -> generate until EOS (no artificial output cap),
+# so reasoning models can finish thinking + answer. The 262144 context window is
+# the model-load setting in LMStudio, not this. (For vLLM, set an explicit cap.)
+
+[retrieval]
+top_k        = 5
+url          = "http://localhost:8529"
+database     = "herobench_kg"
+collection   = "belief_nodes"
+user_env     = "ARANGO_AGENT_USER"          # scoped, read-only
+password_env = "ARANGO_AGENT_PASSWORD"
+embed_url    = "http://localhost:1234"
+embed_model  = "text-embedding-nomic-embed-text-v1.5"
+
+[world]
+base_url  = "http://127.0.0.1:8000"
+character = "character_1"
+
+[capture]
+path = "captures/arango_real.jsonl"

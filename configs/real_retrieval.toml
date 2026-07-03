@@ -1,0 +1,35 @@
+# First REAL retrieval run: live LMStudio decoder + live pgvector retrieval over
+# the seeded HeroBench encyclopedia, with the mock world so no HeroBench server
+# is required. Retrieval connects as the read-only agent role ($PUMPKINSPICE_PG_DSN).
+#   uv run --extra pgvector python scripts/seed_corpus.py   # once, to seed
+#   set -a; . .env.local; set +a
+#   uv run --extra pgvector pumpkinspice run --config configs/real_retrieval.toml
+
+[run]
+decoder   = "lmstudio"
+retrieval = "pgvector"
+world     = "mock"
+prompt    = "default"
+capture   = "jsonl"
+task      = "Craft a copper dagger. What do you need and where do you get it?"
+max_turns = 3
+
+[decoder]
+base_url = "http://localhost:1234"
+model    = "mistral-small-24b-instruct-2501"
+# max_tokens omitted on purpose -> generate until EOS (no artificial output cap),
+# so reasoning models can finish thinking + answer. The 262144 context window is
+# the model-load setting in LMStudio, not this. (For vLLM, set an explicit cap.)
+
+[retrieval]
+top_k        = 5
+dsn_env      = "PUMPKINSPICE_PG_DSN"                       # scoped, read-only
+table        = "kg.belief_nodes"
+embed_url    = "http://localhost:1234"
+embed_model  = "text-embedding-nomic-embed-text-v1.5"      # same model used to seed
+
+[world]
+character = "hero"
+
+[capture]
+path = "captures/real_retrieval.jsonl"
