@@ -1,0 +1,41 @@
+# Stage-1 calibration task: a completable, multi-step goal (gather copper ore ->
+# smelt copper -> craft the dagger, across locations). Held constant across models
+# for the cross-model comparison; the model is overridden per run by `sweep`.
+#   uv run --extra pgvector pumpkinspice sweep -c copper_dagger \
+#       -m "mistral-small-24b-instruct-2501:256,qwen/qwen3.6-27b,gemma-4-26b-a4b-it:256" \
+#       --goal-item copper_dagger
+# ':N' is a per-model max_tokens cap: cap rambling non-reasoning models (e.g. :256)
+# for speed; leave reasoning models (qwen) uncapped so thinking isn't truncated.
+# The task is the GOAL only (reactive baseline): no planning instructions -- that
+# is Stage 2. Uses the strongest retrieval arm (pgvector + relational) so the model
+# has the recipe/source/location chain available; model quality is the variable.
+
+[run]
+decoder   = "lmstudio"
+retrieval = "pgvector"
+world     = "herobench"
+prompt    = "default"
+capture   = "jsonl"
+task      = "Craft a copper dagger."
+max_turns = 50
+goal_item = "copper_dagger"  # stop the run as soon as the dagger is crafted
+
+[decoder]
+base_url = "http://localhost:1234"
+# model overridden by `sweep`; for a single run set e.g. mistral-small-24b-instruct-2501
+# max_tokens omitted -> generate until EOS (reasoning models need the room).
+
+[retrieval]
+top_k        = 6
+dsn_env      = "PUMPKINSPICE_PG_DSN"
+table        = "kg.belief_nodes"
+relational   = true
+embed_url    = "http://localhost:1234"
+embed_model  = "text-embedding-nomic-embed-text-v1.5"
+
+[world]
+base_url  = "http://127.0.0.1:8000"
+character = "character_1"
+
+[capture]
+path = "captures/copper_dagger.jsonl"

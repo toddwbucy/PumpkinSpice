@@ -1,0 +1,38 @@
+# Stage-2 (plan-only) variant of copper_dagger: SAME task, retrieval, world, and
+# model sweep as Stage 1 -- the ONLY change is prompt = "plan", which makes the
+# model commit to a plan on turn 0 and execute it (no re-planning; that is Stage 3).
+# Run it across the same models and compare against the Stage-1 captures to isolate
+# how much a committed plan alone reduces the reactive thrash:
+#   uv run --extra pgvector pumpkinspice sweep -c copper_dagger_plan \
+#       -m "mistral-small-24b-instruct-2501:256,qwen/qwen3.6-27b,gemma-4-26b-a4b-it:256" \
+#       --goal-item copper_dagger
+# (caps are advisory: a reasoning model writing a plan needs the room, leave it 0.)
+
+[run]
+decoder   = "lmstudio"
+retrieval = "pgvector"
+world     = "herobench"
+prompt    = "plan"
+capture   = "jsonl"
+task      = "Craft a copper dagger."
+max_turns = 50
+goal_item = "copper_dagger"  # stop the run as soon as the dagger is crafted
+
+[decoder]
+base_url = "http://localhost:1234"
+# model overridden by `sweep`; max_tokens omitted -> unbounded (plan + thinking room).
+
+[retrieval]
+top_k        = 6
+dsn_env      = "PUMPKINSPICE_PG_DSN"
+table        = "kg.belief_nodes"
+relational   = true
+embed_url    = "http://localhost:1234"
+embed_model  = "text-embedding-nomic-embed-text-v1.5"
+
+[world]
+base_url  = "http://127.0.0.1:8000"
+character = "character_1"
+
+[capture]
+path = "captures/copper_dagger_plan.jsonl"
