@@ -41,7 +41,7 @@ benchmark is a self-contained module added beside it.
 
 ## 4. Information architecture
 
-```
+```text
 PumpkinSpice
 +- Model         landing. Load/swap the model under test (via LMStudio) + app-wide decode defaults
 +- Chat          agentic chat with that model: MCP tools + MCP memory + file attachments
@@ -79,7 +79,7 @@ the benchmark run loop as separate code paths sharing only the decoder (the mode
 
 A run record is written to `captures/results.db` when a run finishes (or is stopped). Sketch:
 
-```
+```text
 runs(
   id            text primary key,    -- run id
   benchmark     text,                -- "herobench"
@@ -154,6 +154,9 @@ Phase 3a - MCP host + in-UI server manager + tool loop (no new infra):
   the right MCP session, append results, loop until the model answers. The chat stream surfaces
   tool-call activity (tool, args, result) alongside reasoning + content.
 - "Memory" is just one of the configured MCP servers (a memory MCP); nothing special-cased.
+- Fallback: when no MCP server is enabled (or MCP is gated off -- unauthenticated servers
+  require the explicit PUMPKINSPICE_ALLOW_MCP=1 opt-in), /api/chat is plain streaming chat:
+  same endpoint and stream shape, no tool loop entered.
 
 Phase 3b - file-attach RAG (pluggable: pgvector / ArangoDB / Neo4j):
 - Paste text into the input = inline (always; just text in the message).

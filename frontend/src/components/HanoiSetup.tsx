@@ -81,7 +81,7 @@ export function HanoiSetup({ onLaunched }: { onLaunched: () => void }) {
             type="number"
             style={{ width: 80 }}
             value={maxTurns}
-            onChange={(e) => setMaxTurns(Math.max(1, Number(e.target.value) || 100))}
+            onChange={(e) => setMaxTurns(Math.max(1, Math.min(1000, Number(e.target.value) || 100)))}
           />
         </div>
         <div>

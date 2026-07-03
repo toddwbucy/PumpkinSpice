@@ -339,11 +339,15 @@ async function consumeSSE(r: Response, onData: (obj: SSEObject) => void): Promis
         if (!line.startsWith("data:")) continue;
         const data = line.slice(5).trim();
         if (!data) continue;
+        let obj: SSEObject;
         try {
-          onData(JSON.parse(data) as SSEObject);
+          obj = JSON.parse(data) as SSEObject;
         } catch {
-          /* ignore malformed frame */
+          continue; /* ignore malformed frame */
         }
+        // dispatch OUTSIDE the parse guard: onData legitimately throws to
+        // propagate server error frames (e.g. chat {error} events)
+        onData(obj);
       }
     }
   }

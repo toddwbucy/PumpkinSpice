@@ -108,7 +108,7 @@ succeed cycle and has a machine-checkable success (the dagger in inventory, craf
 Cross-model sweep (one run each, clean character reset between models; recipe book + CoT +
 move-then-craft + stop-on-goal):
 
-```
+```text
 model                 steps   completed   failed-actions   revisits   tok/s
 ministral-3-14b        14       yes             0              2       18.7
 mistral-small-24b      15       yes             1              3        7.2
@@ -126,7 +126,7 @@ gemma-4-26b-a4b        50       NO              0             47        8.1
 
 Planning-stage ablation (mistral, same equipment, the only variable is the strategy):
 
-```
+```text
 strategy            steps   completed   failed-actions   replans
 replan  (Stage 3)    14       yes             0             8
 plan    (Stage 2)    15       yes             0             0

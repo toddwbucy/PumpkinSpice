@@ -58,8 +58,10 @@ export function HanoiBoard() {
   }
 
   useEffect(() => {
+    let cancelled = false; // unmount before getRuns resolves -> don't start a stream
     getRuns()
       .then((rs) => {
+        if (cancelled) return;
         const running = [...rs].reverse().find((r) => r.status === "running" && r.config_name.includes("hanoi"));
         if (running) {
           watch(running.id);
@@ -68,7 +70,10 @@ export function HanoiBoard() {
         }
       })
       .catch(() => undefined);
-    return () => abortRef.current?.abort();
+    return () => {
+      cancelled = true;
+      abortRef.current?.abort();
+    };
   }, []);
 
   useEffect(() => {

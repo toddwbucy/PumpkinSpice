@@ -82,12 +82,20 @@ export function Settings() {
     }
   }
   async function toggle(s: McpServer) {
-    await setMcpEnabled(s.name, !s.enabled);
-    reload();
+    try {
+      await setMcpEnabled(s.name, !s.enabled);
+      reload();
+    } catch (e) {
+      setErr(String(e));
+    }
   }
   async function remove(n: string) {
-    await deleteMcpServer(n);
-    reload();
+    try {
+      await deleteMcpServer(n);
+      reload();
+    } catch (e) {
+      setErr(String(e));
+    }
   }
 
   return (

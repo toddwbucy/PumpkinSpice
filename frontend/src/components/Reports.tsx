@@ -57,7 +57,7 @@ function RunRow({ r, onSaved }: { r: RunReport; onSaved: () => void }) {
       <td className="num">{m.failed_actions ?? "-"}</td>
       <td className="num">{m.revisits ?? "-"}</td>
       <td className="num">{m.replans ?? "-"}</td>
-      <td className="num">{m.decode_tok_s ? (m.decode_tok_s as number).toFixed(1) : "-"}</td>
+      <td className="num">{m.decode_tok_s != null ? (m.decode_tok_s as number).toFixed(1) : "-"}</td>
       <td>
         <input
           className="cell-edit"
@@ -277,7 +277,7 @@ export function Reports({ benchmark = "herobench" }: { benchmark?: string }) {
                   <td className="num">{b.successes}</td>
                   <td className="num">{(b.success_rate * 100).toFixed(0)}%</td>
                   <td className="num">{b.best_steps ?? "--"}</td>
-                  <td className="num">{b.avg_steps ? b.avg_steps.toFixed(1) : "--"}</td>
+                  <td className="num">{b.avg_steps != null ? b.avg_steps.toFixed(1) : "--"}</td>
                 </tr>
               ))}
             </tbody>

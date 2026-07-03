@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ConfigInfo, Turn, getConfigs, runEventStream, startRun } from "../api";
 import { TurnView } from "./TurnView";
 
@@ -8,6 +8,9 @@ export function Runs() {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [status, setStatus] = useState<string>("");
   const [err, setErr] = useState("");
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => () => abortRef.current?.abort(), []); // cancel the stream on unmount
 
   useEffect(() => {
     getConfigs()
@@ -25,6 +28,9 @@ export function Runs() {
     setStatus("running");
     try {
       const { id } = await startRun(selected);
+      abortRef.current?.abort(); // supersede any previous stream
+      const ctrl = new AbortController();
+      abortRef.current = ctrl;
       await runEventStream(
         id,
         (t) => setTurns((prev) => [...prev, t]),
@@ -32,6 +38,7 @@ export function Runs() {
           setStatus(s);
           if (e) setErr(e);
         },
+        ctrl.signal,
       );
     } catch (e) {
       setErr(String(e));
