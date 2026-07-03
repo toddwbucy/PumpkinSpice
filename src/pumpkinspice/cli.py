@@ -7,6 +7,7 @@ pumpkinspice parity --compare A B         diff two parity artifacts (e.g. LMStud
 pumpkinspice transport --config <file>    transport micro-benchmark (spec s5): latency distribution
 pumpkinspice sweep -c <cfg> -m a:256,b    run a config across models (':N' = per-model max_tokens cap)
 pumpkinspice analyze <captures...>        metrics + cross-model comparison over captures
+pumpkinspice serve                        run the web frontend API + SPA
 """
 
 from __future__ import annotations
@@ -182,6 +183,46 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_reports_import(args: argparse.Namespace) -> int:  # pragma: no cover - thin IO glue
+    """Backfill existing capture JSONL into the run registry so the Reports tab shows
+    historical runs. Strategy is inferred from the filename; model/retrieval from the
+    capture itself."""
+    from . import analyze
+    from .reporting import RunRegistry
+
+    reg = RunRegistry(Path(args.db))
+    paths = [Path(p) for p in args.captures if Path(p).exists() and p.endswith(".jsonl")]
+    n = 0
+    for p in paths:
+        turns = [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+        if not turns:
+            continue
+        m = analyze.analyze_turns(p.stem, turns, goal_item=args.goal_item)
+        stem = p.stem
+        strategy = "replan" if "replan" in stem else "plan" if "plan" in stem else "default"
+        reg.record(
+            {
+                "id": stem,
+                "benchmark": args.benchmark,
+                "model": m.model,
+                "strategy": strategy,
+                "retrieval": m.backend,
+                "task": str(turns[0].get("task") or ""),
+                "goal": args.goal_item or "",
+                "max_turns": len(turns),
+                "started_at": "",
+                "finished_at": "",
+                "status": "imported",
+                "metrics": analyze.metrics_as_dicts([m])[0],
+                "capture_path": str(p),
+                "tags": ["imported"],
+            }
+        )
+        n += 1
+    print(f"imported {n} runs into {args.db}")
+    return 0
+
+
 def _parse_model_spec(spec: str) -> list[tuple[str, int]]:
     """Parse a sweep model spec into (model, max_tokens) pairs.
 
@@ -265,6 +306,29 @@ def _load_env_local(env_file: Path | None = None) -> None:
         log.info("loaded %d scoped credential(s) from .env.local", len(loaded))
 
 
+def _cmd_serve(args: argparse.Namespace) -> int:
+    try:
+        import uvicorn
+
+        from .web.app import create_app
+    except ImportError:
+        log.error("the web frontend needs the 'web' extra: uv sync --extra web")
+        return 2
+    _load_env_local()
+    # .env.local may provide the token; an explicit --token still wins.
+    token = args.token or os.environ.get("PUMPKINSPICE_API_TOKEN") or None
+    if args.host not in ("127.0.0.1", "localhost", "::1") and not token and not args.insecure:
+        log.error(
+            "refusing to bind %s without auth: pass --token (or set "
+            "PUMPKINSPICE_API_TOKEN), or pass --insecure to serve unauthenticated",
+            args.host,
+        )
+        return 2
+    log.info("serving PumpkinSpice API on http://%s:%d", args.host, args.port)
+    uvicorn.run(create_app(api_token=token), host=args.host, port=args.port, log_level="warning")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="pumpkinspice", description=__doc__)
     p.add_argument(
@@ -307,6 +371,15 @@ def build_parser() -> argparse.ArgumentParser:
     analyzep.add_argument("--json", help="also write the metrics as JSON to this path")
     analyzep.set_defaults(func=_cmd_analyze)
 
+    importp = sub.add_parser(
+        "reports-import", help="backfill capture .jsonl into the run registry (Reports tab)"
+    )
+    importp.add_argument("captures", nargs="+", help="capture .jsonl files")
+    importp.add_argument("--db", default="captures/results.db", help="registry SQLite path")
+    importp.add_argument("--benchmark", default="herobench")
+    importp.add_argument("--goal-item", help="success = this item code crafted this run")
+    importp.set_defaults(func=_cmd_reports_import)
+
     sweepp = sub.add_parser("sweep", help="run a config across models, then compare (Stage 1)")
     sweepp.add_argument("--config", "-c", required=True, help="run config (name or path)")
     sweepp.add_argument(
@@ -326,6 +399,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--goal-state-key", help="success = state[key] is truthy (e.g. 'solved' for Hanoi)"
     )
     sweepp.set_defaults(func=_cmd_sweep)
+
+    servep = sub.add_parser("serve", help="run the web frontend API (needs the 'web' extra)")
+    servep.add_argument("--host", default="127.0.0.1")
+    servep.add_argument("--port", type=int, default=8077)
+    servep.add_argument(
+        "--token",
+        default=os.environ.get("PUMPKINSPICE_API_TOKEN"),
+        help="bearer token required on /api/* (default: $PUMPKINSPICE_API_TOKEN; empty = no auth)",
+    )
+    servep.add_argument(
+        "--insecure",
+        action="store_true",
+        help="allow binding a non-loopback host without an API token",
+    )
+    servep.set_defaults(func=_cmd_serve)
     return p
 
 
