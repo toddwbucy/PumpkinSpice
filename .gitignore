@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Test/coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+
+# Ad-hoc screenshots at the repo root (not committed assets)
+/*.png
+
+# uv
+.uv/
+
+# Run artifacts
+captures/
+
+# Secrets -- never commit DB DSNs or model creds
+.env
+.env.*
+*.env

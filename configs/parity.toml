@@ -1,0 +1,20 @@
+# Decoder-parity gate (spec section 4). Greedy-decodes fixed prompts via LMStudio,
+# records the token stream + metadata, and self-checks reproducibility. Diff the
+# resulting artifact against the SPU side with:
+#   pumpkinspice parity --compare captures/parity_lmstudio.json <spu_artifact.json>
+#   uv run pumpkinspice parity --config configs/parity.toml
+
+[decoder]
+base_url = "http://localhost:1234"
+model    = "mistral-small-24b-instruct-2501"
+# sampler defaults are greedy: temperature 0, top_k 1, top_p 1, repeat_penalty 1.0, seed 0
+# sampler = { temperature = 0, top_k = 1, seed = 0 }
+
+[parity]
+max_tokens = 64
+out        = "captures/parity_lmstudio.json"
+fixtures = [
+    "The capital of France is",
+    "Q: What is 17 + 25? A:",
+    "def fibonacci(n):\n    if n < 2:\n        return n\n    return",
+]

@@ -1,0 +1,249 @@
+"""The conventional RAG agent loop (spec section 2, item 4).
+
+Per turn:  get world state -> build retrieval query -> retrieve -> build the
+typical RAG prompt -> call the decoder -> parse the action -> act -> capture.
+
+The model decides what to do; the harness does NOT maintain a world model and
+does NOT autonomically surface memory. That conventional shape is the point of
+the control -- do not "improve" it into autonomic behavior.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from collections.abc import Callable
+from typing import Any
+
+from .contracts import (
+    Action,
+    Capture,
+    Decoder,
+    PromptBuilder,
+    Retrieval,
+    Turn,
+    World,
+)
+from .logging import get_logger
+
+log = get_logger("pumpkinspice.loop")
+
+
+def parse_action(text: str) -> Action:
+    """Extract an action from model output.
+
+    Convention: the model emits a JSON object ``{"action": "<verb>", "args":
+    {...}}`` (optionally fenced). We take the first such object. If none is
+    found, we fall back to a no-op ``rest`` so a malformed turn is recorded
+    rather than crashing the run -- the capture preserves the raw output for
+    analysis either way.
+    """
+    decoder = json.JSONDecoder()
+    # Try to decode a complete JSON value at each '{'; raw_decode handles nested
+    # braces correctly (a regex cannot match balanced brackets).
+    i = text.find("{")
+    while i != -1:
+        try:
+            obj, _end = decoder.raw_decode(text, i)
+        except json.JSONDecodeError:
+            i = text.find("{", i + 1)
+            continue
+        if isinstance(obj, dict) and "action" in obj:
+            args = obj.get("args") or {}
+            if not isinstance(args, dict):
+                args = {}
+            return Action(kind=str(obj["action"]).strip().lower(), args=args, raw_text=text)
+        i = text.find("{", i + 1)
+    return Action(kind="rest", args={}, raw_text=text)
+
+
+def _item_count(state: dict[str, Any], code: str) -> int:
+    """Quantity of ``code`` in a HeroBench character state's inventory (list of
+    {code, quantity} or a {code: qty} dict)."""
+    inv = state.get("inventory")
+    if isinstance(inv, list):
+        return sum(
+            int(i.get("quantity") or 0)
+            for i in inv
+            if isinstance(i, dict) and i.get("code") == code
+        )
+    if isinstance(inv, dict):
+        return int(inv.get(code, 0) or 0)
+    return 0
+
+
+class AgentLoop:
+    def __init__(
+        self,
+        *,
+        decoder: Decoder,
+        retrieval: Retrieval,
+        world: World,
+        prompt: PromptBuilder,
+        capture: Capture,
+        task: str,
+        top_k: int = 5,
+        sampler: dict[str, Any] | None = None,
+        history_window: int = 0,
+        goal_item: str | None = None,
+        goal_level: int | None = None,
+        goal_skill: str | None = None,
+        goal_state_key: str | None = None,
+    ) -> None:
+        self.decoder = decoder
+        self.retrieval = retrieval
+        self.world = world
+        self.prompt = prompt
+        self.capture = capture
+        self.task = task
+        self.top_k = top_k
+        self.sampler = sampler or {}
+        # Stop-on-goal: when set, the run ends as soon as the goal is reached, so
+        # steps == steps-to-completion (not always max_turns). None -> run the full
+        # budget (the web's free-form tasks have no machine-checkable goal).
+        self.goal_item = goal_item
+        self.goal_level = goal_level
+        # goal_skill scopes goal_level to a SKILL (e.g. "weaponcrafting" -> the
+        # state's weaponcrafting_level) instead of the character's combat level.
+        self.goal_skill = goal_skill
+        # goal_state_key: success = state[key] is truthy (a World that reports its
+        # own solved-ness directly, e.g. HanoiWorld's "solved" -- no item/level
+        # counting needed).
+        self.goal_state_key = goal_state_key
+        self._goal_baseline = 0  # count of goal_item at run start (set in play())
+        # In-context working memory: the agent's own prior turns, fed back into the
+        # prompt. NOT persisted, NOT written back to any store (the agent's DB role
+        # is read-only) -- conventional working memory, not autonomic memory.
+        # history_window <= 0 means full history (models run at max context, ~200k,
+        # so there is no need to truncate); a positive value caps the window.
+        self.history_window = history_window
+        self._turns: list[Turn] = []
+
+    def run_turn(self, index: int) -> Turn:
+        t: dict[str, float] = {}
+
+        t0 = time.perf_counter()
+        state = self.world.get_state()
+        t["world_get_state"] = (time.perf_counter() - t0) * 1e3
+
+        query = self.prompt.query_for(state=state, task=self.task)
+
+        t0 = time.perf_counter()
+        retrieval = self.retrieval.retrieve(query, top_k=self.top_k)
+        t["retrieval"] = (time.perf_counter() - t0) * 1e3
+
+        history = self._turns if self.history_window <= 0 else self._turns[-self.history_window :]
+        rendered = self.prompt.build(
+            state=state, retrieval=retrieval, task=self.task, history=history
+        )
+
+        t0 = time.perf_counter()
+        raw = self.decoder.complete(rendered, sampler=self.sampler)
+        t["decode"] = (time.perf_counter() - t0) * 1e3
+
+        # Empty-content guard: a reasoning model that did not finish thinking
+        # returns no content, so the agent would silently fall back to `rest`
+        # every turn. Surface it loudly instead of failing silently.
+        decoder_empty = not raw.strip()
+        if decoder_empty:
+            log.warning(
+                "turn %d: decoder returned EMPTY output -> falling back to 'rest'. "
+                "If this is a reasoning model, it likely did not finish thinking; "
+                "increase the decoder's max_tokens.",
+                index,
+            )
+
+        action = parse_action(raw)
+        # Best-effort provenance: the chain-of-thought and model id, if the decoder
+        # exposes them (for the reasoning viewer and cross-model analysis).
+        reasoning = getattr(self.decoder, "last_reasoning", "")
+        model = getattr(self.decoder, "model", "") or ""
+        usage = getattr(self.decoder, "last_usage", None) or {}
+
+        # Planning strategies (Stage 2+) are stateful prompt builders that learn a
+        # committed plan from the model's output. Optional, duck-typed: the default
+        # reactive builder has no `observe`/`plan`, so this is a no-op for it.
+        observe = getattr(self.prompt, "observe", None)
+        if callable(observe):
+            observe(raw)
+        plan = str(getattr(self.prompt, "plan", ""))
+
+        t0 = time.perf_counter()
+        result = self.world.act(action)
+        t["world_act"] = (time.perf_counter() - t0) * 1e3
+
+        turn = Turn(
+            index=index,
+            task=self.task,
+            world_state=state.raw,
+            retrieval={
+                "query": retrieval.query,
+                "backend": retrieval.backend,
+                "latency_ms": retrieval.latency_ms,
+                "nodes": [
+                    {"id": n.id, "score": n.score, "text": n.text, "metadata": n.metadata}
+                    for n in retrieval.nodes
+                ],
+            },
+            prompt=rendered,
+            raw_output=raw,
+            action={"kind": action.kind, "args": action.args},
+            outcome={
+                "ok": result.ok,
+                "status_code": result.status_code,
+                "error": result.error,
+                "data": result.data,
+            },
+            timings_ms=t,
+            decoder_empty=decoder_empty,
+            reasoning=reasoning,
+            model=model,
+            plan=plan,
+            prompt_tokens=int(usage.get("prompt_tokens", 0)),
+            completion_tokens=int(usage.get("completion_tokens", 0)),
+        )
+        self.capture.record(turn)
+        self._turns.append(turn)
+        return turn
+
+    def _goal_reached(self) -> bool:
+        """Goal = the agent CRAFTED the item this run (count > the start baseline),
+        not merely that it is present -- a reset character can carry residual
+        inventory, which would otherwise read as an instant false completion. Level
+        goals are absolute (you cannot un-level). A fresh get_state is the reliable
+        post-action source (the action response nests the character per verb)."""
+        if self.goal_item is None and self.goal_level is None and self.goal_state_key is None:
+            return False
+        try:
+            state = self.world.get_state().raw
+        except Exception:  # never let a goal check abort an otherwise-fine run
+            return False
+        if self.goal_item is not None:
+            return _item_count(state, self.goal_item) > self._goal_baseline
+        if self.goal_state_key is not None:
+            return bool(state.get(self.goal_state_key))
+        key = f"{self.goal_skill}_level" if self.goal_skill else "level"
+        lvl = state.get(key)
+        return isinstance(lvl, int) and self.goal_level is not None and lvl >= self.goal_level
+
+    def play(self, max_turns: int, should_stop: Callable[[], bool] | None = None) -> list[Turn]:
+        # Baseline the goal item BEFORE playing, so completion means "crafted this run"
+        # -- robust to a contaminated start.
+        self._goal_baseline = 0
+        if self.goal_item is not None:
+            try:
+                self._goal_baseline = _item_count(self.world.get_state().raw, self.goal_item)
+            except Exception:
+                self._goal_baseline = 0
+        try:
+            for i in range(max_turns):
+                if should_stop is not None and should_stop():
+                    log.info("run stopped by request at turn %d (%d turns played)", i, i)
+                    break
+                self.run_turn(i)
+                if self._goal_reached():
+                    log.info("goal reached at turn %d -- stopping early (%d turns)", i, i + 1)
+                    break
+        finally:
+            self.capture.close()
+        return self._turns
