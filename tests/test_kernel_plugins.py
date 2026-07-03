@@ -18,9 +18,12 @@ CONFIG = Path(__file__).resolve().parent.parent / "configs" / "offline.toml"
 def test_all_slots_have_plugins():
     found = kernel.discover()
     assert set(found) == set(kernel.SLOTS)
-    # built-ins registered via entry points
+    # Built-ins registered via entry points AND shipped in this tree. Backends
+    # that are registered but land in later PRs (pgvector/arango retrieval,
+    # plan/replan/executor prompts, hanoi world) are asserted by their own
+    # test modules when their code arrives.
     assert "echo" in found["decoder"] and "lmstudio" in found["decoder"]
-    assert "null" in found["retrieval"] and "pgvector" in found["retrieval"]
+    assert "null" in found["retrieval"]
     assert "mock" in found["world"] and "herobench" in found["world"]
 
 

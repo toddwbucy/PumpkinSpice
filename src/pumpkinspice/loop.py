@@ -138,7 +138,19 @@ class AgentLoop:
         )
 
         t0 = time.perf_counter()
-        raw = self.decoder.complete(rendered, sampler=self.sampler)
+        try:
+            raw = self.decoder.complete(rendered, sampler=self.sampler)
+        except Exception as exc:
+            # A transient decoder failure (timeout, connection reset, 5xx) must
+            # cost one turn, not the whole run: record it as an empty turn (the
+            # guard below flags it and the action falls back to `rest`).
+            log.error(
+                "turn %d: decoder call FAILED (%s: %s) -> recording an empty turn",
+                index,
+                type(exc).__name__,
+                exc,
+            )
+            raw = ""
         t["decode"] = (time.perf_counter() - t0) * 1e3
 
         # Empty-content guard: a reasoning model that did not finish thinking

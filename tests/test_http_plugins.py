@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
 
 from pumpkinspice.contracts import Action
 from pumpkinspice.plugins.decoder_lmstudio import LMStudioDecoder
@@ -155,3 +156,37 @@ def test_herobench_craft_failure_surfaces_reason() -> None:
     r2 = missing.act(Action(kind="craft", args={"code": "copper", "quantity": 6}))
     assert "missing items" in r2.error and "copper_ore" in r2.error
     assert r2.data["error"]["message"]["missing_items"] == {"copper_ore": 37}  # body retained
+
+
+def test_world_get_state_retries_once_then_succeeds(monkeypatch) -> None:
+    """A single transient world failure must not abort a run: get_state retries
+    once (after a short backoff) before giving up."""
+    import time as _time
+
+    monkeypatch.setattr(_time, "sleep", lambda s: None)  # no real backoff in tests
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(503, json={"error": "hiccup"})
+        return httpx.Response(200, json={"x": 0, "y": 0, "level": 1})
+
+    world = HeroBenchWorld({"base_url": "http://world", "character": "c1"})
+    world._client = httpx.Client(base_url="http://world", transport=httpx.MockTransport(handler))
+    state = world.get_state()
+    assert state.raw["level"] == 1 and calls["n"] == 2  # failed once, retried, succeeded
+
+
+def test_world_get_state_raises_with_context_after_retry(monkeypatch) -> None:
+    import time as _time
+
+    monkeypatch.setattr(_time, "sleep", lambda s: None)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": "down"})
+
+    world = HeroBenchWorld({"base_url": "http://world", "character": "c1"})
+    world._client = httpx.Client(base_url="http://world", transport=httpx.MockTransport(handler))
+    with pytest.raises(RuntimeError, match="after retry"):
+        world.get_state()

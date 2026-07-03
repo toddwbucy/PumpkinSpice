@@ -32,7 +32,9 @@ def _load_toml(path: str) -> dict[str, Any]:
     return tomllib.loads(Path(path).read_text())
 
 
-_DEFAULT_DECODER_URL = "http://192.168.0.203:1234"
+# The decoder endpoint moves between hosts (localhost vs a LAN box); default to
+# loopback and let the environment override, same as the web backend does.
+_DEFAULT_DECODER_URL = os.environ.get("PUMPKINSPICE_LMSTUDIO_URL", "http://localhost:1234")
 
 
 def _decoder_client(decoder_cfg: dict[str, Any], timeout: float) -> httpx.Client:
@@ -157,6 +159,9 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     from . import analyze
 
     paths = [Path(p) for p in args.captures if Path(p).exists()]
+    missing = [p for p in args.captures if not Path(p).exists()]
+    if missing:
+        log.warning("skipping %d missing capture(s): %s", len(missing), ", ".join(missing))
     if not paths:
         log.error("no capture files found")
         return 2

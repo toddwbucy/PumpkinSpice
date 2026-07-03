@@ -103,3 +103,32 @@ def test_empty_decode_warns_and_flags(tmp_path: Path, caplog: pytest.LogCaptureF
     assert turns[0].action["kind"] == "rest"  # nothing to parse -> rest
     assert turns[0].decoder_empty is True
     assert any("EMPTY output" in r.message for r in caplog.records)
+
+
+class _RaisingDecoder:
+    """Simulates a transient decoder failure (timeout / connection reset)."""
+
+    name = "raising"
+
+    def complete(self, prompt: str, *, sampler: dict[str, Any] | None = None) -> str:
+        raise RuntimeError("simulated transport failure")
+
+
+def test_decoder_failure_costs_one_turn_not_the_run(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    loop = AgentLoop(
+        decoder=_RaisingDecoder(),
+        retrieval=kernel.load_plugin("retrieval", "null", {}),
+        world=kernel.load_plugin("world", "mock", {}),
+        prompt=kernel.load_plugin("prompt", "default", {}),
+        capture=kernel.load_plugin("capture", "jsonl", {"path": str(tmp_path / "c.jsonl")}),
+        task="do something",
+    )
+    with caplog.at_level(logging.ERROR, logger="pumpkinspice.loop"):
+        turns = loop.play(2)
+
+    # the run SURVIVES the failing decoder: both turns recorded as empty/rest
+    assert len(turns) == 2
+    assert all(t.action["kind"] == "rest" and t.decoder_empty for t in turns)
+    assert any("decoder call FAILED" in r.message for r in caplog.records)

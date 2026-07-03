@@ -22,7 +22,11 @@ def configure_logging(level: str | int | None = None) -> None:
         if level is not None:
             logging.getLogger("pumpkinspice").setLevel(_coerce_level(level))
         return
-    resolved = _coerce_level(level or os.environ.get("PUMPKINSPICE_LOG_LEVEL") or "INFO")
+    # `is not None` (not truthiness): logging.NOTSET is 0, and an explicit 0
+    # must not silently fall through to the environment/INFO default.
+    resolved = _coerce_level(
+        level if level is not None else (os.environ.get("PUMPKINSPICE_LOG_LEVEL") or "INFO")
+    )
     logging.basicConfig(level=resolved, format=DEFAULT_FORMAT, datefmt="%H:%M:%S")
     _CONFIGURED = True
 

@@ -16,6 +16,7 @@ can use the short names from the spec. Default base URL http://127.0.0.1:8000.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import httpx
@@ -80,9 +81,22 @@ class HeroBenchWorld:
         )
 
     def get_state(self) -> WorldState:
-        resp = self._client.get(f"/characters/{self.character}")
-        resp.raise_for_status()
-        return WorldState(raw=resp.json(), source=self.name)
+        """Fetch the character state. One transient failure is retried once (a
+        blip must not abort a long run); a persistent failure raises with
+        context -- there is nothing sensible to play without world state."""
+        last: Exception | None = None
+        for attempt in (0, 1):
+            try:
+                resp = self._client.get(f"/characters/{self.character}")
+                resp.raise_for_status()
+                return WorldState(raw=resp.json(), source=self.name)
+            except httpx.HTTPError as exc:
+                last = exc
+                if attempt == 0:
+                    time.sleep(0.5)
+        raise RuntimeError(
+            f"HeroBench get_state failed for {self.character!r} after retry: {last}"
+        ) from last
 
     def act(self, action: Action) -> ActionResult:
         verb = _VERB_ALIASES.get(action.kind, action.kind)

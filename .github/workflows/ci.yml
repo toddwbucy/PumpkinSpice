@@ -17,6 +17,9 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          # This job only reads the tree; never persist the token into .git.
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5

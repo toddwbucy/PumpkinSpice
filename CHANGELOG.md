@@ -23,16 +23,6 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Temp=0.7` re-runs that exact stochastic trajectory (blank seed = greedy as before), so
   a winning seed found in a batch can be re-run and studied turn by turn.
 
-### Fixed
-- **Composer runs now stop on goal.** Web Setup-launched runs never set `goal_item`
-  (only the CLI configs did), so they ran to `max_turns` and looped after completing
-  the objective. Setup gained a "Goal item (stop on craft)" field, threaded through
-  `RunRequest -> _inline_config -> cfg.run["goal_item"]` into the loop's existing
-  goal-stop. Also added a cooperative Stop control (`AgentLoop.play(should_stop=...)`,
-  a per-run `threading.Event`, `POST /api/runs/{id}/stop`, and a "Stop run" button in
-  the World tab) that ends a run cleanly after its current turn (status `stopped`).
-
-### Added
 - **Agentic Chat with MCP tools (web platform Phase 3a)**: Chat is now an MCP host.
   An in-UI server manager (Settings tab) stores stdio MCP servers
   (`web/mcp_servers.py`, `captures/mcp_servers.json`, `GET/POST/DELETE
@@ -217,6 +207,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   transport is negligible (ping p50 ~0.6ms over the LAN).
 
 ### Fixed
+- **Composer runs now stop on goal.** Web Setup-launched runs never set `goal_item`
+  (only the CLI configs did), so they ran to `max_turns` and looped after completing
+  the objective. Setup gained a "Goal item (stop on craft)" field, threaded through
+  `RunRequest -> _inline_config -> cfg.run["goal_item"]` into the loop's existing
+  goal-stop. Also added a cooperative Stop control (`AgentLoop.play(should_stop=...)`,
+  a per-run `threading.Event`, `POST /api/runs/{id}/stop`, and a "Stop run" button in
+  the World tab) that ends a run cleanly after its current turn (status `stopped`).
+
 - Completion now means the goal item was CRAFTED this run (count rose above the start
   baseline), not merely present. A reset HeroBench character carries residual inventory
   (its `delete` does not clear the `character:<name>:inventory` Redis hash -- a key-name
