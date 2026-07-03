@@ -1,0 +1,40 @@
+# Real run template: LMStudio decoder + pgvector retrieval + live HeroBench.
+# Requires: the pgvector extra (uv sync --extra pgvector), a seeded belief_nodes
+# table, an embedding model in LMStudio, a running HeroBench server, and a
+# SCOPED READ-ONLY Postgres DSN exported as $PUMPKINSPICE_PG_DSN
+# (never the root POSTGRESQL_PASSWORD).
+#   uv run --extra pgvector pumpkinspice run --config configs/lmstudio_pgvector.toml
+
+[run]
+decoder   = "lmstudio"
+retrieval = "pgvector"
+world     = "herobench"
+prompt    = "default"
+capture   = "jsonl"
+task      = "Craft a copper dagger."
+max_turns = 50   # HeroBench tasks are long-horizon (navigation is 1 tile/turn); tune per difficulty
+
+[decoder]
+base_url = "http://localhost:1234"
+# model  = "qwen3-8b"          # omit to use whatever LMStudio has loaded
+# max_tokens omitted on purpose -> generate until EOS (no artificial output cap),
+# so reasoning models can finish thinking + answer. The 262144 context window is
+# the model-load setting in LMStudio, not this. (For vLLM, set an explicit cap.)
+# Greedy is the default; override here if a run calls for it.
+# sampler = { temperature = 0, top_k = 1, seed = 0 }
+
+[retrieval]
+top_k        = 5
+dsn_env      = "PUMPKINSPICE_PG_DSN"   # scoped, read-only
+table        = "belief_nodes"
+text_column  = "text"
+vector_column = "embedding"
+embed_url    = "http://localhost:1234"
+# embed_model = "nomic-embed-text"
+
+[world]
+base_url  = "http://127.0.0.1:8000"
+character = "hero"
+
+[capture]
+path = "captures/lmstudio_pgvector.jsonl"
