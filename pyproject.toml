@@ -56,6 +56,7 @@ dev = [
 
 [project.entry-points."pumpkinspice.decoder"]
 lmstudio = "pumpkinspice.plugins.decoder_lmstudio:LMStudioDecoder"
+vllm = "pumpkinspice.plugins.decoder_vllm:VLLMDecoder"
 echo = "pumpkinspice.plugins.decoder_echo:EchoDecoder"
 
 [project.entry-points."pumpkinspice.retrieval"]
