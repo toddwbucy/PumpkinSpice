@@ -9,6 +9,7 @@ import pytest
 
 from pumpkinspice.contracts import Action
 from pumpkinspice.plugins.decoder_lmstudio import LMStudioDecoder
+from pumpkinspice.plugins.decoder_vllm import VLLMDecoder
 from pumpkinspice.plugins.world_herobench import HeroBenchWorld
 
 
@@ -70,6 +71,48 @@ def test_lmstudio_captures_reasoning() -> None:
     assert d.last_reasoning == "thinking"  # chain-of-thought captured for the viewer/capture
 
 
+def test_lmstudio_captures_gpt_oss_reasoning_field() -> None:
+    # gpt-oss (harmony) returns its chain-of-thought under `reasoning`, not
+    # `reasoning_content`; the decoder must fall back to it or the thinking is lost.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "answer", "reasoning": "gpt-oss cot"}}]},
+        )
+
+    d = LMStudioDecoder({"base_url": "http://x"})
+    d._client = _mock_client(handler, "http://x")
+    assert d.complete("q") == "answer"
+    assert d.last_reasoning == "gpt-oss cot"
+
+
+def test_lmstudio_failed_request_clears_stale_state() -> None:
+    # A 400 (e.g. prompt over a small-context model's window) must NOT leave the
+    # previous turn's reasoning/usage readable -- that would double-count tokens.
+    def ok(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "a", "reasoning": "cot"}}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 900},
+            },
+        )
+
+    def bad(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": "context length exceeded"})
+
+    d = LMStudioDecoder({"base_url": "http://x"})
+    d._client = _mock_client(ok, "http://x")
+    d.complete("q")
+    assert d.last_reasoning == "cot" and d.last_usage["completion_tokens"] == 900
+
+    d._client = _mock_client(bad, "http://x")
+    with pytest.raises(httpx.HTTPStatusError):
+        d.complete("too big")
+    assert d.last_reasoning == ""
+    assert d.last_usage == {"prompt_tokens": 0, "completion_tokens": 0}
+
+
 def test_lmstudio_null_content_maps_to_empty() -> None:
     # a reasoning model mid-thought returns content: null -> must be "", not "None"
     def handler(request: httpx.Request) -> httpx.Response:
@@ -78,6 +121,52 @@ def test_lmstudio_null_content_maps_to_empty() -> None:
     d = LMStudioDecoder({"base_url": "http://x"})
     d._client = _mock_client(handler, "http://x")
     assert d.complete("hello") == ""
+
+
+def test_vllm_payload_uses_vllm_sampler_dialect() -> None:
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/chat/completions"
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "hi"}}]})
+
+    d = VLLMDecoder({"base_url": "http://x", "model": "qwen3-14b"})
+    d._client = _mock_client(handler, "http://x")
+
+    assert d.complete("hello") == "hi"
+    assert captured["model"] == "qwen3-14b"  # required, always sent
+    # greedy in vLLM's dialect, NOT llama.cpp's
+    assert captured["top_k"] == -1  # -1 = all (llama.cpp would be 1)
+    assert captured["repetition_penalty"] == 1.0  # not "repeat_penalty"
+    assert "repeat_penalty" not in captured
+    assert captured["temperature"] == 0
+
+
+def test_vllm_requires_model() -> None:
+    # vLLM 400s without a `model`; fail fast at construction with a clear message.
+    with pytest.raises(ValueError, match="requires a 'model'"):
+        VLLMDecoder({"base_url": "http://x"})
+
+
+def test_vllm_default_port_avoids_herobench() -> None:
+    # default must not collide with the HeroBench world server on :8000
+    d = VLLMDecoder({"model": "m"})
+    assert d.base_url == "http://127.0.0.1:8001"
+
+
+def test_vllm_inherits_reasoning_and_null_handling() -> None:
+    # the shared base logic (reasoning capture, null content -> "") reaches the subclass
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": None, "reasoning_content": "cot"}}]},
+        )
+
+    d = VLLMDecoder({"base_url": "http://x", "model": "m"})
+    d._client = _mock_client(handler, "http://x")
+    assert d.complete("q") == ""  # null content -> ""
+    assert d.last_reasoning == "cot"  # reasoning captured via inherited logic
 
 
 def test_herobench_get_state() -> None:
