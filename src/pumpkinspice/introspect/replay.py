@@ -139,6 +139,10 @@ class ReplayModel:
         self.chat_template = chat_template
 
         model.eval()
+        # The base decoder (no lm_head) is what we forward through -- get_decoder() is
+        # the transformers-standard accessor; fall back to the model itself (the tiny
+        # test model exposes get_decoder too).
+        self._base = model.get_decoder() if hasattr(model, "get_decoder") else model
         layers = _find_decoder_layers(model)
         self.n_layers = len(layers)
         # Per-forward caches, cleared at the start of every replay: the residual
@@ -161,21 +165,29 @@ class ReplayModel:
             self._handles.append(layer.register_forward_hook(self._make_block_hook(idx)))
             self._handles.append(mlp.register_forward_hook(self._make_mlp_hook(idx)))
 
+    @staticmethod
+    def _offload(tensor: Any) -> Any:
+        # Copy the captured tensor to host RAM immediately. Otherwise every layer's
+        # block + MLP output would accumulate on the GPU for the whole forward, and a
+        # long trajectory (36 layers x thousands of tokens x hidden) OOMs even a 48GB
+        # card. The copy leaves the original on-device for the rest of the forward.
+        return None if tensor is None else tensor.detach().to("cpu")
+
     def _block_in_hook(self, _module: Any, args: Any, kwargs: Any) -> None:
         # Decoder layers receive hidden_states as the first positional arg (or, rarely,
         # as a kwarg); handle both so this does not depend on the call convention.
-        self._block_in = args[0] if args else kwargs.get("hidden_states")
+        self._block_in = self._offload(args[0] if args else kwargs.get("hidden_states"))
 
     def _make_block_hook(self, idx: int) -> Any:
         def hook(_module: Any, _inputs: Any, output: Any) -> None:
-            self._block_out[idx] = output[0] if isinstance(output, tuple) else output
+            self._block_out[idx] = self._offload(output[0] if isinstance(output, tuple) else output)
 
         return hook
 
     def _make_mlp_hook(self, idx: int) -> Any:
         def hook(_module: Any, _inputs: Any, output: Any) -> None:
             # Some MLP modules return a tuple; the update tensor is the first element.
-            self._mlp_out[idx] = output[0] if isinstance(output, tuple) else output
+            self._mlp_out[idx] = self._offload(output[0] if isinstance(output, tuple) else output)
 
         return hook
 
@@ -220,7 +232,16 @@ class ReplayModel:
                 "(uv sync --extra replay)"
             ) from exc
 
-        load_kw: dict[str, Any] = {"torch_dtype": getattr(torch, dtype), **(load_kwargs or {})}
+        # Default to SDPA attention: eager attention materializes the full seq x seq
+        # score matrix, which OOMs on long reasoning trajectories (a 10k-token trace
+        # needs a ~15GB single allocation). SDPA is O(seq) memory and gives the same
+        # residual stream we read, so the geometry is unaffected. Overridable via
+        # load_kwargs (e.g. attn_implementation="flash_attention_2").
+        load_kw: dict[str, Any] = {
+            "torch_dtype": getattr(torch, dtype),
+            "attn_implementation": "sdpa",
+            **(load_kwargs or {}),
+        }
         tok_kw: dict[str, Any] = {}
         if gguf_file is not None:
             load_kw["gguf_file"] = gguf_file
@@ -246,10 +267,16 @@ class ReplayModel:
 
         if self.chat_template and getattr(self.tokenizer, "chat_template", None):
             # Reproduce what the model actually processed: the chat wrapper the decoder's
-            # /v1/chat/completions server applied around the user content.
-            prompt_ids = self.tokenizer.apply_chat_template(
-                [{"role": "user", "content": prompt}], add_generation_prompt=True
+            # /v1/chat/completions server applied around the user content. Render the
+            # template to a STRING then tokenize it (add_special_tokens=False -- the
+            # template already emits BOS/role markers). This is what the vLLM server does
+            # internally, and unlike apply_chat_template(tokenize=True) -- which in recent
+            # transformers returns a BatchEncoding of Encoding objects, not a flat id list
+            # -- it yields a plain list[int] across versions.
+            text = self.tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}], add_generation_prompt=True, tokenize=False
             )
+            prompt_ids = self.tokenizer(str(text), add_special_tokens=False)["input_ids"]
         else:
             prompt_ids = self.tokenizer(prompt, add_special_tokens=True)["input_ids"]
         output_ids = self.tokenizer(output, add_special_tokens=False)["input_ids"]
@@ -281,7 +308,11 @@ class ReplayModel:
         self._block_out.clear()
         self._mlp_out.clear()
         with torch.no_grad():
-            self.model(input_ids=input_ids, use_cache=False)
+            # Run the base decoder, NOT the full CausalLM: the lm_head projects the whole
+            # sequence to [seq, vocab] logits (~15GB for a 10k-token trace over a 150k
+            # vocab) that we never use -- we read the residual stream via hooks. The base
+            # model still runs every layer, so all hooks fire.
+            self._base(input_ids=input_ids, use_cache=False)
         if (
             self._block_in is None
             or len(self._block_out) != self.n_layers

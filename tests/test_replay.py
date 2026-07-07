@@ -127,7 +127,12 @@ def test_missing_mlp_submodule_raises_and_cleans_up() -> None:
 
 
 class _FakeTok:
-    """Minimal tokenizer: 1 token per character, ids in-vocab (1..31)."""
+    """Minimal tokenizer: 1 token per character, ids in-vocab (1..31).
+
+    Models a REAL tokenizer's chat path: apply_chat_template(tokenize=False) renders
+    to a STRING (here a 2-char '>' + content marker), which the driver then tokenizes
+    -- NOT the id list a too-kind fake would return directly (that masked the
+    BatchEncoding/string bug that only a real tokenizer exposes)."""
 
     def __init__(self, chat_template: str | None = None) -> None:
         self.chat_template = chat_template
@@ -136,9 +141,12 @@ class _FakeTok:
         return {"input_ids": [(ord(c) % 31) + 1 for c in text]}
 
     def apply_chat_template(
-        self, messages: list[dict[str, str]], add_generation_prompt: bool = True
-    ) -> list[int]:
-        return self(messages[0]["content"])["input_ids"]
+        self,
+        messages: list[dict[str, str]],
+        add_generation_prompt: bool = True,
+        tokenize: bool = False,
+    ) -> str:
+        return ">>" + messages[0]["content"]  # rendered template string, not ids
 
 
 def test_replay_plain_tokenizer_path() -> None:
@@ -150,9 +158,11 @@ def test_replay_plain_tokenizer_path() -> None:
 
 
 def test_replay_chat_template_path() -> None:
-    # A non-empty chat_template routes _encode through apply_chat_template.
+    # A non-empty chat_template routes _encode through apply_chat_template, which
+    # renders to a string that is then tokenized: ">>hey" -> 5 prompt tokens. (A
+    # regression here catches the apply_chat_template-returns-a-string bug.)
     rm = ReplayModel(_tiny_llama(), tokenizer=_FakeTok(chat_template="tmpl"))
     m = rm.replay("hey", "abcdef")
-    assert m.n_prompt_tokens == 3  # apply_chat_template mapped the 3-char content
+    assert m.n_prompt_tokens == 5  # 2-char ">>" marker + 3-char content, tokenized
     assert m.n_output_tokens == 6
     rm.close()
