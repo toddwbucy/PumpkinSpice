@@ -26,11 +26,12 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Sync (core + dev + backends + web + mcp + introspect + replay)
+      - name: Sync (core + dev + backends + web + mcp + introspect + replay + evaluate)
         # mypy strict resolves imports, so every extra whose module ships in
         # src/ must be installed here (mcp is lazy-imported by web/mcp_host.py).
-        # `replay` pulls torch/transformers so the replay-driver smoke test runs.
-        run: uv sync --extra pgvector --extra arango --extra web --extra mcp --extra introspect --extra replay
+        # `replay` pulls torch/transformers, `evaluate` pulls scikit-learn, so
+        # the replay smoke test and the evaluator tests both run.
+        run: uv sync --extra pgvector --extra arango --extra web --extra mcp --extra introspect --extra replay --extra evaluate
 
       - name: Format check
         run: uv run ruff format --check .
