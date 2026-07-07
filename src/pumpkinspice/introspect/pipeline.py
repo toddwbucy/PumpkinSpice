@@ -31,6 +31,9 @@ def build_output(turn: dict[str, Any]) -> str:
 
     Reasoning models emit their thinking separately (captured in ``reasoning``); the
     trajectory of interest is the whole generation, so prepend it to ``raw_output``.
+    The reasoning/answer seam is joined without a separator, so (like the prompt/output
+    seam in ReplayModel._encode) the re-tokenized ids may differ slightly there from
+    the original generation -- within the same stated tolerance.
     """
     reasoning = turn.get("reasoning") or ""
     raw = turn.get("raw_output") or ""
@@ -69,10 +72,13 @@ def replay_captures(
     """Replay every capture and write labeled-metrics rows. Returns (written,
     skipped). A turn is skipped (not fatal) when its forced continuation is too
     short for a trajectory (< 2 tokens) -- e.g. an empty-output turn."""
+    # Read (and parse) the input fully BEFORE truncating the output, so a missing or
+    # corrupt captures path does not destroy a previous good metrics file.
+    turns = _read_jsonl(captures_path)
     written = 0
     skipped = 0
     with Path(out_path).open("w", encoding="utf-8") as w:
-        for turn in _read_jsonl(captures_path):
+        for turn in turns:
             output = output_fn(turn)
             try:
                 metrics = model.replay(str(turn.get("prompt", "")), output)

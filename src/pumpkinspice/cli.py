@@ -221,12 +221,20 @@ def _cmd_mathbench(
 
     cfg = load_config(args.config)
     decoder = kernel.load_plugin("decoder", cfg.plugin_name("decoder"), cfg.slot_config("decoder"))
+    # JsonlCapture appends: warn so a re-run does not silently concatenate a second
+    # corpus into the same file (which would replay duplicates into the floor test).
+    if Path(args.out).exists():
+        log.warning(
+            "%s exists; JsonlCapture appends -- delete it first for a clean corpus", args.out
+        )
     capture = kernel.load_plugin("capture", "jsonl", {"path": args.out})
-    levels = {int(x) for x in args.levels.split(",")} if args.levels else None
+    levels = {int(x) for x in args.levels.split(",") if x.strip()} if args.levels else None
     problems = bm.load_math_dir(args.data_dir, levels=levels, limit=args.limit)
     log.info("MATH: %d problems -> %s", len(problems), args.out)
-    turns = bm.run_math_benchmark(decoder, problems, capture, hard_level=args.hard_level)
-    capture.close()
+    try:
+        turns = bm.run_math_benchmark(decoder, problems, capture, hard_level=args.hard_level)
+    finally:
+        capture.close()
     n_correct = sum(1 for t in turns if t.outcome.get("correct"))
     log.info(
         "decoded %d, correct %d (%.1f%%)",

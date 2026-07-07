@@ -99,3 +99,15 @@ def test_replay_captures_writes_labeled_metrics(tmp_path) -> None:  # type: igno
     # the metrics survived serialization and are usable downstream
     assert turns[0].metrics.n_layers == 2
     assert set(turns[0].metrics.d_rho) == {0.5, 0.75, 0.9}
+
+
+def test_replay_captures_preserves_output_on_bad_input(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # A missing captures path must not clobber a previous good metrics file: the
+    # input is read (and here, fails) before the output is truncated.
+    out = tmp_path / "labeled.jsonl"
+    out.write_text("PREVIOUS GOOD OUTPUT")
+    model = ReplayModel(_tiny_model(), tokenizer=_FakeTok())
+    with pytest.raises(OSError):
+        replay_captures(model, tmp_path / "does_not_exist.jsonl", out)
+    model.close()
+    assert out.read_text() == "PREVIOUS GOOD OUTPUT"  # untouched

@@ -67,7 +67,14 @@ def load_math_dir(
     """
     problems: list[MathProblem] = []
     for path in sorted(Path(root).rglob("*.json")):
-        data = json.loads(path.read_text())
+        # Name the offending file: a MATH dir is thousands of JSONs, so a bare
+        # JSONDecodeError / KeyError from one bad file is near-impossible to locate.
+        try:
+            data = json.loads(path.read_text())
+            problem = str(data["problem"])
+            solution = str(data["solution"])
+        except (json.JSONDecodeError, KeyError, OSError) as exc:
+            raise ValueError(f"{path}: malformed MATH problem JSON: {exc}") from exc
         m = _LEVEL_RE.search(str(data.get("level", "")))
         level = int(m.group(1)) if m else 0
         subject = str(data.get("type", "")) or path.parent.name
@@ -78,8 +85,8 @@ def load_math_dir(
         problems.append(
             MathProblem(
                 problem_id=str(path.relative_to(root).with_suffix("")),
-                problem=str(data["problem"]),
-                solution=str(data["solution"]),
+                problem=problem,
+                solution=solution,
                 level=level,
                 subject=subject,
             )
@@ -102,24 +109,31 @@ def build_prompt(problem: str) -> str:
 
 
 def last_boxed_string(s: str) -> str | None:
-    """The last ``\\boxed{...}`` (or ``\\fbox{...}``) substring, brace-matched, or None."""
-    idx = s.rfind("\\boxed")
-    if idx < 0:
-        idx = s.rfind("\\fbox")
-        if idx < 0:
-            return None
-    depth = 0
-    i = idx
-    started = False
-    while i < len(s):
-        if s[i] == "{":
-            depth += 1
-            started = True
-        elif s[i] == "}":
-            depth -= 1
-            if started and depth == 0:
-                return s[idx : i + 1]
-        i += 1
+    """The last ``\\boxed{...}`` / ``\\fbox{...}`` substring, or None.
+
+    Handles both the brace form ``\\boxed{...}`` (brace-matched) and the rarer
+    space form ``\\boxed 5`` (up to the next ``$`` or end), matching the canonical
+    MATH ``last_boxed_only_string`` so gold solutions in either form parse.
+    """
+    for cmd in ("\\boxed", "\\fbox"):
+        idx = s.rfind(cmd)
+        if idx >= 0:
+            break
+    else:
+        return None
+    after = s[idx + len(cmd) :]
+    if after[:1] == "{":
+        depth = 0
+        for j, ch in enumerate(after):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return s[idx : idx + len(cmd) + j + 1]
+        return None  # unbalanced braces
+    if after[:1] == " ":
+        return cmd + " " + after[1:].split("$")[0]
     return None
 
 
@@ -130,8 +144,9 @@ def strip_boxed(s: str | None) -> str | None:
     for prefix in ("\\boxed{", "\\fbox{"):
         if s.startswith(prefix) and s.endswith("}"):
             return s[len(prefix) : -1]
-    if s.startswith("\\boxed "):
-        return s[len("\\boxed ") :]
+    for prefix in ("\\boxed ", "\\fbox "):
+        if s.startswith(prefix):
+            return s[len(prefix) :]
     return None
 
 
@@ -193,13 +208,21 @@ def normalize_answer(s: str) -> str:
     s = s.replace("\\left", "").replace("\\right", "")
     s = s.replace("^{\\circ}", "").replace("^\\circ", "")
     s = s.replace("\\$", "").replace("$", "")
-    s = re.sub(r"\\text{.*?}", "", s)
+    # Strip ONLY trailing units, not every \text{...}: canonical _remove_right_units
+    # splits on "\text{ " (brace + space, the unit-writing convention like "3\text{ cm}")
+    # and keeps the left part. A blanket re.sub would delete textual answers
+    # (\text{even}, \text{Evelyn}) -> both sides normalize to "" -> false-positive grade.
+    if "\\text{ " in s:
+        s = s.split("\\text{ ")[0]
     s = s.replace("\\%", "").replace("%", "")
     s = s.replace(" .", " 0.").replace("{.", "{0.")
     if s.startswith("."):
         s = "0" + s
-    if "=" in s:
-        s = s.split("=")[-1]
+    # Take the RHS of a simple "x = ..." equation only (exactly one "=", short LHS),
+    # matching canonical; leaves multi-equality strings (x=y=3) untouched.
+    parts = s.split("=")
+    if len(parts) == 2 and len(parts[0]) <= 2:
+        s = parts[1]
     s = _fix_sqrt(s)
     s = s.replace(" ", "")
     s = _fix_fracs(s)
@@ -210,6 +233,9 @@ def normalize_answer(s: str) -> str:
 
 
 def is_equiv(a: str | None, b: str | None) -> bool:
+    # Deliberately stricter than canonical (which treats None==None as equivalent):
+    # here a missing extraction on either side is never a correct grade, so an
+    # unparseable answer cannot be scored right by accident.
     if a is None or b is None:
         return False
     return normalize_answer(a) == normalize_answer(b)

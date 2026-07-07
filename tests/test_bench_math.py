@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from pumpkinspice.contracts import Turn
 from pumpkinspice.introspect.bench_math import (
     grade,
@@ -51,6 +53,34 @@ def test_normalization_branches() -> None:
     assert normalize_answer("x/y") == "x/y"  # non-integer slash left alone
     assert normalize_answer(r"\sqrt{9}") == r"\sqrt{9}"  # already braced sqrt
     assert normalize_answer(r"3\text{ cm}") == "3"  # units stripped
+
+
+def test_text_answers_not_stripped() -> None:
+    # Regression: a blanket \text{} strip made every text answer normalize to "" ->
+    # any two text answers graded equal. Only trailing units ("\text{ cm}") strip.
+    assert normalize_answer(r"\text{even}") == r"\text{even}"  # kept, not emptied
+    assert normalize_answer(r"3\text{ cm}") == "3"  # units still removed
+    even = r"The parity is \boxed{\text{even}}."
+    assert grade(r"...so \boxed{\text{even}}", even)[0] is True
+    assert grade(r"...so \boxed{\text{odd}}", even)[0] is False  # was a false positive
+
+
+def test_boxed_space_form_end_to_end() -> None:
+    assert last_boxed_string(r"the answer is \boxed 5") == r"\boxed 5"
+    # a gold solution written in the space form now grades end to end
+    assert grade(r"result: \boxed{5}", r"hence \boxed 5")[0] is True
+
+
+def test_equation_split_is_faithful() -> None:
+    assert normalize_answer("x=7") == "7"  # short LHS, single '=' -> RHS
+    assert normalize_answer("x=y=3") == "x=y=3"  # multi-equality left untouched
+
+
+def test_load_math_dir_names_bad_file(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    (tmp_path / "Algebra").mkdir()
+    (tmp_path / "Algebra" / "bad.json").write_text("{not json")
+    with pytest.raises(ValueError, match=r"bad\.json"):
+        load_math_dir(tmp_path)
 
 
 def test_is_equiv_forms() -> None:
