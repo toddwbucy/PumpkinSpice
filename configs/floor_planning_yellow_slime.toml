@@ -1,0 +1,37 @@
+# HeroBench floor-test ramp -- tier 'yellow_slime' (HARD - requires the gear-dependency chain).
+# Part of the calibrated planning ramp for the #7/#8 floor test. Fixed 100-turn
+# budget with NO goal_item: run the full budget to see how far the model climbs;
+# correctness is scored afterward by
+#   pumpkinspice replay-metrics captures/floor_planning_yellow_slime.jsonl \
+#       --model <hf-id> --herobench-tier yellow_slime -o metrics_yellow_slime.jsonl
+# Task string is the source-of-truth copy of bench_herobench.RAMP['yellow_slime'].task.
+# Run across models with `sweep`; strongest retrieval (pgvector+relational) so the
+# type-matching is a planning signal, not retrieval starvation.
+
+[run]
+decoder   = "lmstudio"
+retrieval = "pgvector"
+world     = "herobench"
+prompt    = "replan"
+capture   = "jsonl"
+task      = 'Defeat a Yellow Slime. It resists earth damage, so first craft a weapon of a different damage type -- the copper dagger deals air damage.'
+max_turns = 100
+
+[decoder]
+base_url = "http://localhost:1234"
+# model overridden per run by `sweep`; use the SAME model you will replay.
+
+[retrieval]
+top_k       = 6
+dsn_env     = "PUMPKINSPICE_PG_DSN"
+table       = "kg.belief_nodes"
+relational  = true
+embed_url   = "http://localhost:1234"
+embed_model = "text-embedding-nomic-embed-text-v1.5"
+
+[world]
+base_url  = "http://127.0.0.1:8000"
+character = "character_1"
+
+[capture]
+path = "captures/floor_planning_yellow_slime.jsonl"
