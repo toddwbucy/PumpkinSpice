@@ -54,6 +54,19 @@ def test_effective_dimension_requires_2d() -> None:
         effective_dimension(np.arange(5.0), 0.9)
 
 
+def test_non_finite_input_is_rejected() -> None:
+    # NaN/inf would otherwise surface as an opaque LinAlgError (eigvalsh) or as
+    # silently dropped tokens (cosine); the coercion guard makes it a clear error.
+    nan_traj = np.array([[1.0, 2.0], [np.nan, 3.0]])
+    inf_traj = np.array([[1.0, 2.0], [np.inf, 3.0]])
+    with pytest.raises(ValueError, match="finite"):
+        effective_dimension(nan_traj, 0.9)
+    with pytest.raises(ValueError, match="finite"):
+        early_kinematics(nan_traj)
+    with pytest.raises(ValueError, match="finite"):
+        mean_token_cosine(inf_traj, nan_traj)
+
+
 # --- early_kinematics -------------------------------------------------------
 
 
@@ -141,3 +154,12 @@ def test_roc_auc_shape_guard() -> None:
         roc_auc([0.1, 0.2, 0.3], [0, 1])  # length mismatch
     with pytest.raises(ValueError, match="1-D of equal length"):
         roc_auc([[0.1, 0.2]], [[0, 1]])  # 2-D
+
+
+def test_roc_auc_rejects_non_finite_scores() -> None:
+    # Regression: a NaN score used to hang _average_ranks' equality-based tie walk
+    # forever (NaN != NaN). It must raise, not spin.
+    with pytest.raises(ValueError, match="finite"):
+        roc_auc([0.1, np.nan, 0.8, 0.9], [0, 0, 1, 1])
+    with pytest.raises(ValueError, match="finite"):
+        roc_auc([0.1, np.inf, 0.8, 0.9], [0, 0, 1, 1])

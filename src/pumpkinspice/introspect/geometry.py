@@ -34,20 +34,28 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 
 Array = NDArray[np.float64]
 
 
-def _as_2d_float(a: object, *, name: str = "trajectory") -> Array:
-    """Coerce to a 2-D (T, d) float64 array or raise with a clear message."""
+def _as_2d_float(a: ArrayLike, *, name: str = "trajectory") -> Array:
+    """Coerce to a 2-D (T, d) float64 array or raise with a clear message.
+
+    Rejects non-finite values (NaN/inf) up front. Left unguarded they surface
+    differently in each functional -- an opaque LinAlgError from eigvalsh in
+    effective_dimension, or silently dropped tokens in mean_token_cosine that hide
+    a degenerate upstream signal -- so catch them once, here, with a clear message.
+    """
     x = np.asarray(a, dtype=np.float64)
     if x.ndim != 2:
         raise ValueError(f"{name} must be 2-D (T, d); got shape {x.shape}")
+    if not np.isfinite(x).all():
+        raise ValueError(f"{name} must be finite; got NaN or inf")
     return x
 
 
-def effective_dimension(trajectory: object, rho: float) -> int:
+def effective_dimension(trajectory: ArrayLike, rho: float) -> int:
     """d_rho: principal components of the trajectory covariance needed to capture
     ``rho`` of the variance.
 
@@ -99,7 +107,7 @@ class EarlyKinematics:
     n_points: int  # size of the early window actually used (>= 2)
 
 
-def early_kinematics(trajectory: object, fraction: float = 0.2) -> EarlyKinematics:
+def early_kinematics(trajectory: ArrayLike, fraction: float = 0.2) -> EarlyKinematics:
     """Compute the seven early kinematics over the first ``fraction`` of the
     trajectory (default 0.2 = the "first fifth" of #7).
 
@@ -126,17 +134,18 @@ def early_kinematics(trajectory: object, fraction: float = 0.2) -> EarlyKinemati
         final_state=p[-1].copy(),
         mean_velocity=v.mean(axis=0),
         mean_speed=float(speeds.mean()),
-        speed_dispersion=float(speeds.std()),
+        speed_dispersion=float(speeds.std()),  # population std (ddof=0)
         n_points=k,
     )
 
 
-def mean_token_cosine(update: object, residual: object, *, eps: float = 1e-12) -> float:
+def mean_token_cosine(update: ArrayLike, residual: ArrayLike, *, eps: float = 1e-12) -> float:
     """rho: per-token cosine between a layer's ``update`` and the ``residual``
     entering it, averaged over tokens (#8).
 
-    Both arrays are (T, d) aligned by token. Tokens where either vector is ~zero
-    have undefined cosine and are dropped; if none remain, returns 0.0. Applying
+    Both arrays are (T, d) aligned by token (non-finite entries are rejected by the
+    array coercion). Tokens where either vector is ~zero have undefined cosine and
+    are dropped; if none remain, returns 0.0. Applying
     this to the full-block update gives rho_block; to the MLP-alone update gives
     rho_MLP -- the driver chooses which residual each is measured against.
     """
@@ -168,17 +177,22 @@ def _average_ranks(a: Array) -> Array:
     return ranks
 
 
-def roc_auc(scores: object, labels: object) -> float:
+def roc_auc(scores: ArrayLike, labels: ArrayLike) -> float:
     """Rank-based (Mann-Whitney) ROC AUC: the probability a random positive scores
     above a random negative, with ties counted as half.
 
     ``labels`` are truthy (positive) / falsy (negative). Raises if either class is
-    empty (AUC is undefined). Tie-aware, so all-equal scores give exactly 0.5.
+    empty (AUC is undefined) or if any score is non-finite. Tie-aware, so all-equal
+    scores give exactly 0.5.
     """
     s = np.asarray(scores, dtype=np.float64)
     y = np.asarray(labels).astype(bool)
     if s.shape != y.shape or s.ndim != 1:
         raise ValueError(f"scores and labels must be 1-D of equal length; got {s.shape}, {y.shape}")
+    # A NaN score would make _average_ranks' equality-based tie walk loop forever
+    # (NaN != NaN), so reject non-finite scores loudly instead of hanging.
+    if not np.isfinite(s).all():
+        raise ValueError("scores must be finite; got NaN or inf")
     n_pos = int(y.sum())
     n_neg = int(y.size - n_pos)
     if n_pos == 0 or n_neg == 0:

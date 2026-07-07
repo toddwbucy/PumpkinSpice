@@ -27,7 +27,8 @@ arango = ["python-arango>=8.0"]
 web = ["fastapi>=0.115", "uvicorn[standard]>=0.30"]
 mcp = ["mcp>=1.0"]  # the MCP host for the agentic Chat (Phase 3a); optional
 # Offline trajectory-geometry metrics for the floor tests (issues #7, #8). numpy
-# only -- the heavy teacher-forced replay driver (torch/transformers) is separate.
+# only -- the heavy teacher-forced replay driver (torch/transformers) lands later
+# behind its own `replay` extra.
 introspect = ["numpy>=1.26"]
 
 [project.urls]
