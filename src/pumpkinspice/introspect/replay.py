@@ -12,11 +12,21 @@ Signals from ONE forward pass:
   * #7 -- the final-layer trajectory (d_rho + early kinematics).
   * #8 -- per-layer novelty rho_block / rho_MLP.
 
-``output_hidden_states=True`` already yields the residual entering every block and
-the full-block update (a difference of consecutive hidden states), so rho_block and
-the #7 trajectory need no hooks. Only rho_MLP needs the MLP submodule's isolated
-output, captured by one forward hook per layer; the MLP's own input residual is then
-recovered for free as ``h_out - delta_mlp`` (no attention hook needed).
+Norm handling (an operationalization choice, deliberately explicit). ``transformers``
+exposes the final residual only AFTER the model's final norm (RMSNorm/LayerNorm) as
+``output_hidden_states[-1]`` -- the true residual leaving the last block is never in
+that tuple. Using it would distort the last layer's block update and rescale every
+trajectory point. So this driver ignores ``output_hidden_states`` and reads the TRUE
+pre-norm residual stream directly with hooks: a forward hook on each block (its output
+= the residual leaving it) and a forward-pre-hook on layer 0 (its input = the token
+embeddings actually fed in, including any Gemma-style sqrt(d) scaling). Every per-layer
+rho is then on one pre-norm footing, and the #7 trajectory is the pre-final-norm final
+residual. The post-final-norm stream is the alternative reading, not used here.
+
+Hooks needed: one per block (block output) + one per block's MLP (isolated MLP update)
++ one pre-hook on layer 0 (embeddings). rho_block and the #7 trajectory then come from
+the block outputs; the MLP's own input residual is recovered as ``h_out - delta_mlp``,
+so the attention sublayer is never hooked.
 
 The operationalization knobs that geometry.py deliberately left to the call site are
 constructor params here, with documented defaults flagged for pre-registration:
@@ -54,7 +64,11 @@ MlpResidual = Literal["block_in", "mlp_in"]
 @dataclass(frozen=True)
 class TrajectoryMetrics:
     """Per-turn trajectory-geometry metrics (the compact reduction of one replayed
-    forward pass; raw residuals are never returned)."""
+    forward pass; raw residuals are never returned).
+
+    ``frozen`` gives shallow immutability only -- ``d_rho`` and the arrays remain
+    mutable, so do not rely on this for hashing or caching.
+    """
 
     d_rho: dict[float, int]  # variance fraction -> effective dimension (#7)
     kinematics: EarlyKinematics  # early kinematics of the trajectory (#7)
@@ -69,8 +83,9 @@ def _find_decoder_layers(model: Any) -> Any:
     """Locate the list of transformer blocks across common architectures.
 
     Covers the Llama-family layout (Qwen / Mistral / Ministral / Gemma:
-    ``model.model.layers``) and GPT-2 (``model.transformer.h``, used by the tiny
-    test model). Raises with a clear message if neither is present.
+    ``model.model.layers``), GPT-2 (``model.transformer.h``, used by the tiny test
+    model), and GPT-NeoX (``model.gpt_neox.layers``). Raises with a clear message if
+    none is present.
     """
     for path in (("model", "layers"), ("transformer", "h"), ("gpt_neox", "layers")):
         obj = model
@@ -82,7 +97,7 @@ def _find_decoder_layers(model: Any) -> Any:
             return obj
     raise ValueError(
         "could not locate decoder layers; supported layouts are model.model.layers "
-        "(Llama-family) and model.transformer.h (GPT-2)"
+        "(Llama-family), model.transformer.h (GPT-2), and model.gpt_neox.layers (GPT-NeoX)"
     )
 
 
@@ -126,16 +141,36 @@ class ReplayModel:
         model.eval()
         layers = _find_decoder_layers(model)
         self.n_layers = len(layers)
-        # One forward hook per layer captures the MLP's isolated output into a cache
-        # keyed by layer index; the cache is cleared at the start of every replay.
+        # Per-forward caches, cleared at the start of every replay: the residual
+        # entering layer 0 (embeddings), each block's output, each MLP's output.
+        self._block_in: Any = None
+        self._block_out: dict[int, Any] = {}
         self._mlp_out: dict[int, Any] = {}
         self._handles: list[Any] = []
+        # Pre-hook on layer 0 captures the true embeddings fed to the stack (post any
+        # architecture-specific scaling), which output_hidden_states[0] would also give
+        # but only alongside the full -- and post-final-norm -- tuple.
+        self._handles.append(
+            layers[0].register_forward_pre_hook(self._block_in_hook, with_kwargs=True)
+        )
         for idx, layer in enumerate(layers):
             mlp = getattr(layer, "mlp", None)
             if mlp is None:
                 self.close()
                 raise ValueError(f"layer {idx} has no `.mlp` submodule; cannot capture rho_MLP")
+            self._handles.append(layer.register_forward_hook(self._make_block_hook(idx)))
             self._handles.append(mlp.register_forward_hook(self._make_mlp_hook(idx)))
+
+    def _block_in_hook(self, _module: Any, args: Any, kwargs: Any) -> None:
+        # Decoder layers receive hidden_states as the first positional arg (or, rarely,
+        # as a kwarg); handle both so this does not depend on the call convention.
+        self._block_in = args[0] if args else kwargs.get("hidden_states")
+
+    def _make_block_hook(self, idx: int) -> Any:
+        def hook(_module: Any, _inputs: Any, output: Any) -> None:
+            self._block_out[idx] = output[0] if isinstance(output, tuple) else output
+
+        return hook
 
     def _make_mlp_hook(self, idx: int) -> Any:
         def hook(_module: Any, _inputs: Any, output: Any) -> None:
@@ -145,7 +180,7 @@ class ReplayModel:
         return hook
 
     def close(self) -> None:
-        """Remove the forward hooks. Safe to call more than once."""
+        """Remove all forward hooks. Safe to call more than once."""
         for handle in self._handles:
             handle.remove()
         self._handles = []
@@ -164,14 +199,17 @@ class ReplayModel:
         gguf_file: str | None = None,
         device: str = "cpu",
         dtype: str = "float32",
+        load_kwargs: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> ReplayModel:
         """Load a causal LM + tokenizer from the Hub or a local path.
 
         Pass ``gguf_file`` to dequantize the SAME GGUF the harness served (matching
         the numerical object that produced the trace); support is limited to the
-        architectures transformers can convert. Large models may need ``accelerate``
-        and a ``device`` / ``device_map`` the caller manages.
+        architectures transformers can convert. Extra ``from_pretrained`` loading
+        options (e.g. ``device_map``, ``low_cpu_mem_usage`` for large models, which
+        also want ``accelerate`` installed) go through ``load_kwargs``; remaining
+        ``**kwargs`` configure the ReplayModel (the operationalization knobs).
         """
         try:
             import torch
@@ -182,7 +220,7 @@ class ReplayModel:
                 "(uv sync --extra replay)"
             ) from exc
 
-        load_kw: dict[str, Any] = {"torch_dtype": getattr(torch, dtype)}
+        load_kw: dict[str, Any] = {"torch_dtype": getattr(torch, dtype), **(load_kwargs or {})}
         tok_kw: dict[str, Any] = {}
         if gguf_file is not None:
             load_kw["gguf_file"] = gguf_file
@@ -197,7 +235,13 @@ class ReplayModel:
     def _encode(self, prompt: str, output: str) -> tuple[Any, int]:
         """Build teacher-forced input_ids = prompt tokens + output tokens, and the
         prompt length. The output is appended without special tokens so the forced
-        continuation concatenates cleanly at a known boundary."""
+        continuation concatenates at a known boundary.
+
+        Note: ``output`` is re-tokenized independently, so at the prompt/output seam
+        the token ids can differ slightly (leading-space / BPE-merge effects) from
+        what the model originally emitted. Harmless for the geometry, but it means the
+        replayed ids are not guaranteed byte-identical to the generation.
+        """
         import torch
 
         if self.chat_template and getattr(self.tokenizer, "chat_template", None):
@@ -220,20 +264,34 @@ class ReplayModel:
 
     def replay_token_ids(self, input_ids: Any, n_prompt_tokens: int) -> TrajectoryMetrics:
         """Core extraction on pre-tokenized ids: one instrumented forward pass ->
-        the geometry functionals over the chosen span."""
+        the geometry functionals over the chosen span. ``input_ids`` must be a single
+        ``(1, S)`` sequence."""
         import torch
 
         input_ids = input_ids.to(self.model.device)
+        if input_ids.dim() != 2 or input_ids.shape[0] != 1:
+            raise ValueError(
+                f"expected a single (1, S) sequence; got shape {tuple(input_ids.shape)}"
+            )
+        seq_len = int(input_ids.shape[1])
+        if not 0 <= n_prompt_tokens <= seq_len:
+            raise ValueError(f"n_prompt_tokens must be in [0, {seq_len}]; got {n_prompt_tokens}")
+
+        self._block_in = None
+        self._block_out.clear()
         self._mlp_out.clear()
         with torch.no_grad():
-            out = self.model(input_ids=input_ids, output_hidden_states=True, use_cache=False)
-        hidden = out.hidden_states  # tuple of (n_layers + 1) tensors, each (1, S, d)
-        if len(self._mlp_out) != self.n_layers:
+            self.model(input_ids=input_ids, use_cache=False)
+        if (
+            self._block_in is None
+            or len(self._block_out) != self.n_layers
+            or len(self._mlp_out) != self.n_layers
+        ):
             raise RuntimeError(
-                f"captured {len(self._mlp_out)} MLP outputs but model has {self.n_layers} layers"
+                f"instrumentation incomplete: block_in={'set' if self._block_in is not None else 'missing'}, "
+                f"{len(self._block_out)} block / {len(self._mlp_out)} mlp outputs for {self.n_layers} layers"
             )
 
-        seq_len = int(input_ids.shape[1])
         n_output_tokens = seq_len - n_prompt_tokens
         lo = n_prompt_tokens if self.trajectory_span == "output" else 0
         if seq_len - lo < 2:
@@ -242,15 +300,19 @@ class ReplayModel:
                 f"(span={self.trajectory_span!r}, prompt={n_prompt_tokens}, seq={seq_len})"
             )
 
-        final = _to_numpy(hidden[-1])[lo:]
+        block_out = {i: _to_numpy(self._block_out[i]) for i in range(self.n_layers)}
+        embeddings = _to_numpy(self._block_in)
+
+        # #7 trajectory: the TRUE final block output (pre-final-norm residual). See class docs.
+        final = block_out[self.n_layers - 1][lo:]
         d_rho = {rho: effective_dimension(final, rho) for rho in self.rho_thresholds}
         kinematics = early_kinematics(final, self.kinematics_fraction)
 
         rho_block = np.empty(self.n_layers, dtype=np.float64)
         rho_mlp = np.empty(self.n_layers, dtype=np.float64)
-        prev = _to_numpy(hidden[0])  # residual entering layer 0 (embeddings)
+        prev = embeddings  # residual entering layer 0
         for i in range(self.n_layers):
-            cur = _to_numpy(hidden[i + 1])  # residual leaving layer i
+            cur = block_out[i]  # residual leaving layer i (pre-norm, from the hook)
             h_in, h_out = prev[lo:], cur[lo:]
             delta_block = h_out - h_in
             delta_mlp = _to_numpy(self._mlp_out[i])[lo:]

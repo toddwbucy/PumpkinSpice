@@ -91,6 +91,18 @@ jsonl = "pumpkinspice.plugins.capture_jsonl:JsonlCapture"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# Pin the replay extra's torch to the CPU wheels. Unpinned `torch` resolves to the
+# multi-GB CUDA build on Linux, which is pure weight for a CPU smoke test and would
+# blow the 10 GB GitHub Actions cache. The driver is device-agnostic; an analysis
+# box that needs CUDA torch installs it outside the lock.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/pumpkinspice"]
 

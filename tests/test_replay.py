@@ -23,6 +23,7 @@ from pumpkinspice.introspect.replay import (  # noqa: E402  (after importorskip)
 
 
 def _tiny_llama() -> object:
+    torch.manual_seed(0)  # deterministic random weights, no flake risk
     cfg = transformers.LlamaConfig(
         vocab_size=32,
         hidden_size=16,
@@ -36,7 +37,7 @@ def _tiny_llama() -> object:
 
 
 def _ids(seq_len: int) -> object:
-    # Deterministic, in-vocab token ids (no Math.random equivalent needed).
+    # Deterministic, in-vocab token ids as a single (1, S) sequence.
     return torch.arange(seq_len, dtype=torch.long).remainder(32).unsqueeze(0)
 
 
@@ -91,11 +92,20 @@ def test_short_span_raises() -> None:
 
 def test_context_manager_removes_hooks() -> None:
     with ReplayModel(_tiny_llama(), tokenizer=None) as rm:
-        assert len(rm._handles) == 2
+        assert len(rm._handles) == 5  # 1 pre-hook + (block + mlp) per 2 layers
     assert rm._handles == []
-    # With hooks gone, the MLP cache no longer fills -> the guard fires.
-    with pytest.raises(RuntimeError, match="captured 0 MLP outputs"):
+    # With hooks gone, the caches no longer fill -> the guard fires.
+    with pytest.raises(RuntimeError, match="instrumentation incomplete"):
         rm.replay_token_ids(_ids(9), n_prompt_tokens=3)
+
+
+def test_input_validation() -> None:
+    rm = ReplayModel(_tiny_llama(), tokenizer=None)
+    with pytest.raises(ValueError, match=r"single \(1, S\) sequence"):
+        rm.replay_token_ids(torch.zeros((2, 6), dtype=torch.long), n_prompt_tokens=2)
+    with pytest.raises(ValueError, match="n_prompt_tokens must be in"):
+        rm.replay_token_ids(_ids(9), n_prompt_tokens=99)  # > seq_len
+    rm.close()
 
 
 def test_find_decoder_layers_llama_and_unknown() -> None:
