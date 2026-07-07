@@ -250,11 +250,27 @@ def _cmd_replay_metrics(args: argparse.Namespace) -> int:  # pragma: no cover - 
     from .introspect import pipeline
     from .introspect.replay import ReplayModel
 
+    # For HeroBench planning captures, derive (planning, eventual-correct, tier-hard)
+    # from the calibrated ramp; otherwise use the default outcome-based labeler.
+    label_fn: pipeline.LabelFn = pipeline.labels_from_outcome
+    if args.herobench_tier:
+        from .introspect import bench_herobench as bh
+
+        if args.herobench_tier not in bh.RAMP:
+            log.error(
+                "unknown --herobench-tier %r; choices: %s", args.herobench_tier, ", ".join(bh.RAMP)
+            )
+            return 2
+        rows = [json.loads(ln) for ln in Path(args.captures).read_text().splitlines() if ln.strip()]
+        label_fn = bh.make_label_fn(rows, bh.RAMP[args.herobench_tier])
+
     model = ReplayModel.from_pretrained(
         args.model, gguf_file=args.gguf, device=args.device, trajectory_span=args.span
     )
     try:
-        written, skipped = pipeline.replay_captures(model, args.captures, args.out)
+        written, skipped = pipeline.replay_captures(
+            model, args.captures, args.out, label_fn=label_fn
+        )
     finally:
         model.close()
     log.info("wrote %d labeled turns (skipped %d) -> %s", written, skipped, args.out)
@@ -481,6 +497,12 @@ def build_parser() -> argparse.ArgumentParser:
     replayp.add_argument("--device", default="cpu", help="torch device (cpu, cuda, ...)")
     replayp.add_argument(
         "--span", default="output", choices=["output", "full"], help="trajectory span"
+    )
+    replayp.add_argument(
+        # Tier names mirror bench_herobench.RAMP; validated against it at runtime.
+        "--herobench-tier",
+        help="label as a HeroBench planning tier (control_gather/chicken_level2/"
+        "copper_dagger/yellow_slime/weaponcrafting5); scores eventual correctness + difficulty",
     )
     replayp.set_defaults(func=_cmd_replay_metrics)
 
