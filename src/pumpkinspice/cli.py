@@ -7,6 +7,7 @@ pumpkinspice parity --compare A B         diff two parity artifacts (e.g. LMStud
 pumpkinspice transport --config <file>    transport micro-benchmark (spec s5): latency distribution
 pumpkinspice sweep -c <cfg> -m a:256,b    run a config across models (':N' = per-model max_tokens cap)
 pumpkinspice analyze <captures...>        metrics + cross-model comparison over captures
+pumpkinspice floortest <metrics.jsonl>    #7/#8 floor-test AUCs + kill verdicts (needs 'evaluate')
 pumpkinspice serve                        run the web frontend API + SPA
 """
 
@@ -180,6 +181,33 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     if args.json:
         Path(args.json).write_text(json.dumps(analyze.metrics_as_dicts(metrics), indent=2))
         log.info("wrote metrics to %s", args.json)
+    return 0
+
+
+def _cmd_floortest(args: argparse.Namespace) -> int:
+    """Evaluate the #7/#8 floor test over a labeled-metrics JSONL (produced by the
+    replay step) and print the report; optionally write the JSON."""
+    from .introspect import evaluate as ev
+
+    try:
+        turns = ev.load_labeled_turns(args.metrics)
+    except (OSError, json.JSONDecodeError, KeyError) as exc:
+        log.error("could not read labeled metrics %s: %s", args.metrics, exc)
+        return 2
+    if not turns:
+        log.error("no labeled turns in %s", args.metrics)
+        return 2
+    try:
+        report = ev.evaluate_floor_test(
+            turns, agentic_type=args.agentic_type, threshold=args.threshold
+        )
+    except ValueError as exc:  # e.g. incommensurable corpus
+        log.error("evaluation failed: %s", exc)
+        return 2
+    print(report.summary())
+    if args.json:
+        Path(args.json).write_text(json.dumps(ev.report_to_dict(report), indent=2))
+        log.info("wrote report to %s", args.json)
     return 0
 
 
@@ -370,6 +398,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     analyzep.add_argument("--json", help="also write the metrics as JSON to this path")
     analyzep.set_defaults(func=_cmd_analyze)
+
+    floortestp = sub.add_parser(
+        "floortest", help="evaluate the #7/#8 floor test over a labeled-metrics JSONL"
+    )
+    floortestp.add_argument("metrics", help="labeled-metrics .jsonl (from the replay step)")
+    floortestp.add_argument(
+        "--agentic-type", default="tool_use", help="task_type kill #1 (d_rho hard/easy) applies to"
+    )
+    floortestp.add_argument(
+        "--threshold", type=float, default=0.7, help="kill AUC threshold (pre-registered 0.7)"
+    )
+    floortestp.add_argument("--json", help="also write the report as JSON to this path")
+    floortestp.set_defaults(func=_cmd_floortest)
 
     importp = sub.add_parser(
         "reports-import", help="backfill capture .jsonl into the run registry (Reports tab)"
