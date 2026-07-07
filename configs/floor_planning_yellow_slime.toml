@@ -4,9 +4,9 @@
 # correctness is scored afterward by
 #   pumpkinspice replay-metrics captures/floor_planning_yellow_slime.jsonl \
 #       --model <hf-id> --herobench-tier yellow_slime -o metrics_yellow_slime.jsonl
-# Task string is the source-of-truth copy of bench_herobench.RAMP['yellow_slime'].task.
-# Run across models with `sweep`; strongest retrieval (pgvector+relational) so the
-# type-matching is a planning signal, not retrieval starvation.
+# Task string is the source-of-truth copy of bench_herobench.RAMP['yellow_slime'].task
+# (a test asserts they stay in sync). Run across models with `sweep`; strongest
+# retrieval (pgvector+relational) so the type-matching is a planning signal.
 
 [run]
 decoder   = "lmstudio"
@@ -14,7 +14,7 @@ retrieval = "pgvector"
 world     = "herobench"
 prompt    = "replan"
 capture   = "jsonl"
-task      = 'Defeat a Yellow Slime. It resists earth damage, so first craft a weapon of a different damage type -- the copper dagger deals air damage.'
+task      = 'Defeat Yellow Slimes and reach character level 3. A Yellow Slime resists earth damage, so first craft a weapon of a different type -- the copper dagger deals air damage.'
 max_turns = 100
 
 [decoder]

@@ -8,12 +8,18 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
+# bench_herobench itself only needs `analyze` (core), but it lives in the introspect
+# package whose __init__ re-exports geometry (numpy), so importing it needs the extra.
+pytest.importorskip("numpy")
+
 from pumpkinspice.introspect.bench_herobench import (
     MAX_TURNS,
     RAMP,
     TASK_TYPE,
     eventual_correct,
-    label_fn,
+    make_label_fn,
 )
 
 
@@ -49,28 +55,28 @@ def test_ramp_integrity() -> None:
 
 def test_label_fn_level_goal() -> None:
     reached = [_turn(level=1), _turn(level=2)]  # climbed to level 2
-    lf = label_fn(reached, RAMP["chicken_level2"])
+    lf = make_label_fn(reached, RAMP["chicken_level2"])
     assert lf(reached[0]) == (TASK_TYPE, True, False)
 
     stuck = [_turn(level=1), _turn(level=1)]  # never leveled
-    assert label_fn(stuck, RAMP["chicken_level2"])(stuck[0]) == (TASK_TYPE, False, False)
+    assert make_label_fn(stuck, RAMP["chicken_level2"])(stuck[0]) == (TASK_TYPE, False, False)
 
 
 def test_label_fn_item_goal_and_hard_flag() -> None:
     # ash_wood absent at start, present at end -> correct; control tier is easy
     got = [_turn(inventory=[]), _turn(inventory=[{"code": "ash_wood", "quantity": 3}])]
-    assert label_fn(got, RAMP["control_gather"])(got[-1]) == (TASK_TYPE, True, False)
+    assert make_label_fn(got, RAMP["control_gather"])(got[-1]) == (TASK_TYPE, True, False)
 
     # copper_dagger never crafted -> incorrect, and the tier is hard
     none = [_turn(inventory=[]), _turn(inventory=[{"code": "copper_ore", "quantity": 5}])]
-    assert label_fn(none, RAMP["copper_dagger"])({}) == (TASK_TYPE, False, True)
+    assert make_label_fn(none, RAMP["copper_dagger"])({}) == (TASK_TYPE, False, True)
 
 
 def test_label_is_eventual_and_shared_across_turns() -> None:
     # correctness is the run's EVENTUAL outcome, so even the pre-goal first turn is
     # labeled correct once the run later reaches the goal.
     rows = [_turn(level=1), _turn(level=1), _turn(level=2)]
-    lf = label_fn(rows, RAMP["chicken_level2"])
+    lf = make_label_fn(rows, RAMP["chicken_level2"])
     assert all(lf(r) == (TASK_TYPE, True, False) for r in rows)
 
 
@@ -78,3 +84,16 @@ def test_eventual_correct_skill_goal() -> None:
     reached = [_turn(weaponcrafting_level=1), _turn(weaponcrafting_level=5)]
     assert eventual_correct(reached, RAMP["weaponcrafting5"]) is True
     assert eventual_correct([_turn(weaponcrafting_level=3)], RAMP["weaponcrafting5"]) is False
+
+
+def test_configs_match_ramp() -> None:
+    # Enforce the "can't drift" claim: each config's task + budget mirror RAMP, and
+    # none sets goal_item (the run must go the full budget; scoring is done afterward).
+    import tomllib
+    from pathlib import Path
+
+    for name, task in RAMP.items():
+        cfg = tomllib.loads(Path(f"configs/floor_planning_{name}.toml").read_text())
+        assert cfg["run"]["task"] == task.task, f"{name}: config task drifted from RAMP"
+        assert cfg["run"]["max_turns"] == MAX_TURNS
+        assert "goal_item" not in cfg["run"], f"{name}: config must not stop early on a goal"

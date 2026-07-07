@@ -4,9 +4,9 @@
 # correctness is scored afterward by
 #   pumpkinspice replay-metrics captures/floor_planning_copper_dagger.jsonl \
 #       --model <hf-id> --herobench-tier copper_dagger -o metrics_copper_dagger.jsonl
-# Task string is the source-of-truth copy of bench_herobench.RAMP['copper_dagger'].task.
-# Run across models with `sweep`; strongest retrieval (pgvector+relational) so the
-# type-matching is a planning signal, not retrieval starvation.
+# Task string is the source-of-truth copy of bench_herobench.RAMP['copper_dagger'].task
+# (a test asserts they stay in sync). Run across models with `sweep`; strongest
+# retrieval (pgvector+relational) so the type-matching is a planning signal.
 
 [run]
 decoder   = "lmstudio"

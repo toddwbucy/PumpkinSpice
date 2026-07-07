@@ -4,9 +4,9 @@
 # correctness is scored afterward by
 #   pumpkinspice replay-metrics captures/floor_planning_chicken_level2.jsonl \
 #       --model <hf-id> --herobench-tier chicken_level2 -o metrics_chicken_level2.jsonl
-# Task string is the source-of-truth copy of bench_herobench.RAMP['chicken_level2'].task.
-# Run across models with `sweep`; strongest retrieval (pgvector+relational) so the
-# type-matching is a planning signal, not retrieval starvation.
+# Task string is the source-of-truth copy of bench_herobench.RAMP['chicken_level2'].task
+# (a test asserts they stay in sync). Run across models with `sweep`; strongest
+# retrieval (pgvector+relational) so the type-matching is a planning signal.
 
 [run]
 decoder   = "lmstudio"

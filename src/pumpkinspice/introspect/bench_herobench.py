@@ -25,10 +25,15 @@ model.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pumpkinspice import analyze
-from pumpkinspice.introspect.pipeline import LabelFn
+
+if TYPE_CHECKING:
+    # Only needed for the LabelFn return annotation (a string under `from __future__
+    # import annotations`). Importing pipeline at runtime would drag in the numpy
+    # replay stack, breaking this "pure/offline" module on a core-only install.
+    from pumpkinspice.introspect.pipeline import LabelFn
 
 # The task type these turns carry into the evaluator (contrasts with MATH "reasoning").
 TASK_TYPE = "planning"
@@ -76,10 +81,14 @@ RAMP: dict[str, RampTask] = {
         ),
         RampTask(
             "yellow_slime",
-            "Defeat a Yellow Slime. It resists earth damage, so first craft a weapon "
-            "of a different damage type -- the copper dagger deals air damage.",
+            "Defeat Yellow Slimes and reach character level 3. A Yellow Slime resists "
+            "earth damage, so first craft a weapon of a different type -- the copper "
+            "dagger deals air damage.",
             hard=True,
-            goal_item="yellow_slimeball",
+            # Scored by character level, NOT the yellow_slimeball drop: that drop is
+            # rate 20 (~5% per kill), so a genuine kill would score wrong ~95% of the
+            # time. Level 3 is a reliable proxy for sustained combat past the chicken tier.
+            goal_level=3,
         ),
         RampTask(
             "weaponcrafting5",
@@ -106,7 +115,7 @@ def eventual_correct(turns: list[dict[str, Any]], task: RampTask) -> bool:
     return bool(metrics.success)
 
 
-def label_fn(turns: list[dict[str, Any]], task: RampTask) -> LabelFn:
+def make_label_fn(turns: list[dict[str, Any]], task: RampTask) -> LabelFn:
     """Build a per-turn labeler: every turn of the run gets (planning, eventual-correct,
     tier-hard). Correctness is computed once over the whole run and shared across turns,
     so it is the trajectory's EVENTUAL outcome, not its instantaneous state."""

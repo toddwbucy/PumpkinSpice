@@ -247,8 +247,6 @@ def _cmd_mathbench(
 
 def _cmd_replay_metrics(args: argparse.Namespace) -> int:  # pragma: no cover - needs a model
     """Teacher-force replay a capture JSONL into labeled trajectory-metrics JSONL."""
-    import json as _json
-
     from .introspect import pipeline
     from .introspect.replay import ReplayModel
 
@@ -263,10 +261,8 @@ def _cmd_replay_metrics(args: argparse.Namespace) -> int:  # pragma: no cover - 
                 "unknown --herobench-tier %r; choices: %s", args.herobench_tier, ", ".join(bh.RAMP)
             )
             return 2
-        rows = [
-            _json.loads(ln) for ln in Path(args.captures).read_text().splitlines() if ln.strip()
-        ]
-        label_fn = bh.label_fn(rows, bh.RAMP[args.herobench_tier])
+        rows = [json.loads(ln) for ln in Path(args.captures).read_text().splitlines() if ln.strip()]
+        label_fn = bh.make_label_fn(rows, bh.RAMP[args.herobench_tier])
 
     model = ReplayModel.from_pretrained(
         args.model, gguf_file=args.gguf, device=args.device, trajectory_span=args.span
@@ -503,6 +499,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--span", default="output", choices=["output", "full"], help="trajectory span"
     )
     replayp.add_argument(
+        # Tier names mirror bench_herobench.RAMP; validated against it at runtime.
         "--herobench-tier",
         help="label as a HeroBench planning tier (control_gather/chicken_level2/"
         "copper_dagger/yellow_slime/weaponcrafting5); scores eventual correctness + difficulty",
