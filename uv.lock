@@ -879,6 +879,9 @@ dependencies = [
 arango = [
     { name = "python-arango" },
 ]
+introspect = [
+    { name = "numpy" },
+]
 mcp = [
     { name = "mcp" },
 ]
@@ -906,12 +909,13 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.0" },
+    { name = "numpy", marker = "extra == 'introspect'", specifier = ">=1.26" },
     { name = "pgvector", marker = "extra == 'pgvector'", specifier = ">=0.3" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'pgvector'", specifier = ">=3.1" },
     { name = "python-arango", marker = "extra == 'arango'", specifier = ">=8.0" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'web'", specifier = ">=0.30" },
 ]
-provides-extras = ["pgvector", "arango", "web", "mcp"]
+provides-extras = ["pgvector", "arango", "web", "mcp", "introspect"]
 
 [package.metadata.requires-dev]
 dev = [
