@@ -7,6 +7,8 @@ pumpkinspice parity --compare A B         diff two parity artifacts (e.g. LMStud
 pumpkinspice transport --config <file>    transport micro-benchmark (spec s5): latency distribution
 pumpkinspice sweep -c <cfg> -m a:256,b    run a config across models (':N' = per-model max_tokens cap)
 pumpkinspice analyze <captures...>        metrics + cross-model comparison over captures
+pumpkinspice mathbench -c <cfg> --data-dir MATH   decode a local MATH dataset -> Turn captures
+pumpkinspice replay-metrics <caps> --model M -o M.jsonl  captures -> labeled metrics (needs 'replay')
 pumpkinspice floortest <metrics.jsonl>    #7/#8 floor-test AUCs + kill verdicts (needs 'evaluate')
 pumpkinspice serve                        run the web frontend API + SPA
 """
@@ -211,6 +213,46 @@ def _cmd_floortest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_mathbench(
+    args: argparse.Namespace,
+) -> int:  # pragma: no cover - needs a live decoder + data
+    """Decode a local MATH dataset through the configured decoder into Turn captures."""
+    from .introspect import bench_math as bm
+
+    cfg = load_config(args.config)
+    decoder = kernel.load_plugin("decoder", cfg.plugin_name("decoder"), cfg.slot_config("decoder"))
+    capture = kernel.load_plugin("capture", "jsonl", {"path": args.out})
+    levels = {int(x) for x in args.levels.split(",")} if args.levels else None
+    problems = bm.load_math_dir(args.data_dir, levels=levels, limit=args.limit)
+    log.info("MATH: %d problems -> %s", len(problems), args.out)
+    turns = bm.run_math_benchmark(decoder, problems, capture, hard_level=args.hard_level)
+    capture.close()
+    n_correct = sum(1 for t in turns if t.outcome.get("correct"))
+    log.info(
+        "decoded %d, correct %d (%.1f%%)",
+        len(turns),
+        n_correct,
+        100 * n_correct / max(len(turns), 1),
+    )
+    return 0
+
+
+def _cmd_replay_metrics(args: argparse.Namespace) -> int:  # pragma: no cover - needs a model
+    """Teacher-force replay a capture JSONL into labeled trajectory-metrics JSONL."""
+    from .introspect import pipeline
+    from .introspect.replay import ReplayModel
+
+    model = ReplayModel.from_pretrained(
+        args.model, gguf_file=args.gguf, device=args.device, trajectory_span=args.span
+    )
+    try:
+        written, skipped = pipeline.replay_captures(model, args.captures, args.out)
+    finally:
+        model.close()
+    log.info("wrote %d labeled turns (skipped %d) -> %s", written, skipped, args.out)
+    return 0
+
+
 def _cmd_reports_import(args: argparse.Namespace) -> int:  # pragma: no cover - thin IO glue
     """Backfill existing capture JSONL into the run registry so the Reports tab shows
     historical runs. Strategy is inferred from the filename; model/retrieval from the
@@ -411,6 +453,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     floortestp.add_argument("--json", help="also write the report as JSON to this path")
     floortestp.set_defaults(func=_cmd_floortest)
+
+    mathp = sub.add_parser("mathbench", help="decode a local MATH dataset into Turn captures")
+    mathp.add_argument("--config", "-c", required=True, help="config selecting the decoder")
+    mathp.add_argument("--data-dir", required=True, help="directory of MATH release JSON files")
+    mathp.add_argument("--out", "-o", default="captures/math.jsonl", help="capture output path")
+    mathp.add_argument("--levels", help="comma-separated difficulty levels to include (e.g. 3,4,5)")
+    mathp.add_argument("--limit", type=int, help="cap the number of problems")
+    mathp.add_argument("--hard-level", type=int, default=4, help="level >= this counts as hard")
+    mathp.set_defaults(func=_cmd_mathbench)
+
+    replayp = sub.add_parser(
+        "replay-metrics", help="teacher-force replay captures into labeled metrics (needs 'replay')"
+    )
+    replayp.add_argument("captures", help="capture .jsonl to replay")
+    replayp.add_argument("--model", required=True, help="model id or path for the replay model")
+    replayp.add_argument("--out", "-o", required=True, help="labeled-metrics .jsonl output")
+    replayp.add_argument("--gguf", help="gguf_file to dequantize the same GGUF the harness served")
+    replayp.add_argument("--device", default="cpu", help="torch device (cpu, cuda, ...)")
+    replayp.add_argument(
+        "--span", default="output", choices=["output", "full"], help="trajectory span"
+    )
+    replayp.set_defaults(func=_cmd_replay_metrics)
 
     importp = sub.add_parser(
         "reports-import", help="backfill capture .jsonl into the run registry (Reports tab)"
