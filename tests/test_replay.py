@@ -48,6 +48,7 @@ def test_replay_produces_wellformed_metrics() -> None:
     assert m.n_prompt_tokens == 3
     assert m.n_output_tokens == 6
     assert m.n_layers == 2
+    assert m.dtype == "float32"  # provenance: the tiny model loads at float32
 
     # d_rho: one entry per default threshold, each a count within the span length.
     assert set(m.d_rho) == {0.5, 0.75, 0.9}

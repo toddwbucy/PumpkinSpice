@@ -235,6 +235,7 @@ def _validate_corpus(turns: list[LabeledTurn]) -> None:
     """
     thresholds = set(turns[0].metrics.d_rho)
     n_layers = turns[0].metrics.n_layers
+    dtype = turns[0].metrics.dtype
     for i, t in enumerate(turns):
         if set(t.metrics.d_rho) != thresholds:
             raise ValueError(
@@ -245,6 +246,11 @@ def _validate_corpus(turns: list[LabeledTurn]) -> None:
             raise ValueError(
                 f"turn {i}: n_layers {t.metrics.n_layers} != {n_layers} "
                 "(cannot pool rho curves across models of different depth)"
+            )
+        if t.metrics.dtype != dtype:
+            raise ValueError(
+                f"turn {i}: replay dtype {t.metrics.dtype!r} != {dtype!r} "
+                "(bf16 and fp32 perturb the geometry; do not pool across precisions)"
             )
 
 
@@ -381,6 +387,7 @@ def metrics_to_dict(m: TrajectoryMetrics) -> dict[str, Any]:
         "n_prompt_tokens": m.n_prompt_tokens,
         "n_output_tokens": m.n_output_tokens,
         "n_layers": m.n_layers,
+        "dtype": m.dtype,
     }
 
 
@@ -404,6 +411,7 @@ def metrics_from_dict(d: dict[str, Any]) -> TrajectoryMetrics:
         n_prompt_tokens=int(d["n_prompt_tokens"]),
         n_output_tokens=int(d["n_output_tokens"]),
         n_layers=int(d["n_layers"]),
+        dtype=str(d.get("dtype", "unknown")),
     )
 
 

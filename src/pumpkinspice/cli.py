@@ -500,11 +500,15 @@ def build_parser() -> argparse.ArgumentParser:
     replayp.add_argument("--gguf", help="gguf_file to dequantize the same GGUF the harness served")
     replayp.add_argument("--device", default="cpu", help="torch device (cpu, cuda, ...)")
     replayp.add_argument(
-        # fp32 is safest for the geometry, but a 14B loads at ~56GB fp32 and OOMs a
-        # 48GB card -- use bfloat16 there (hidden states are cast to float64 anyway).
+        # The load dtype DOES affect the geometry (the residual stream is computed at
+        # it; the float64 cast is post-hoc) -- but empirically bf16 vs fp32 shifts d_rho
+        # ~0.3%. fp32 SDPA also falls back to the seq^2 math kernel, so long traces
+        # (10k+ tokens) need bf16 to fit a 48GB card. bf16 is the practical default;
+        # the dtype is recorded in each metrics row so corpora can't mix precisions.
         "--dtype",
-        default="float32",
-        help="model load dtype (float32 | bfloat16 | float16); use bfloat16 for 14B on 48GB",
+        default="bfloat16",
+        choices=["float32", "bfloat16", "float16"],
+        help="model load dtype; bfloat16 fits long traces on a 48GB card, fp32 is highest fidelity",
     )
     replayp.add_argument(
         "--span", default="output", choices=["output", "full"], help="trajectory span"

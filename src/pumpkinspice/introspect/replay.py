@@ -77,6 +77,10 @@ class TrajectoryMetrics:
     n_prompt_tokens: int
     n_output_tokens: int
     n_layers: int
+    # Load dtype the forward ran at (bf16 vs fp32 perturb d_rho/rho ~0.3%). Recorded
+    # as provenance so a floor-test corpus cannot silently pool incommensurable
+    # precisions; the evaluator rejects a mix. Default marks pre-provenance metrics.
+    dtype: str = "unknown"
 
 
 def _find_decoder_layers(model: Any) -> Any:
@@ -139,6 +143,8 @@ class ReplayModel:
         self.chat_template = chat_template
 
         model.eval()
+        # Provenance: the parameter dtype the forward runs at (e.g. "bfloat16").
+        self.dtype = str(getattr(model, "dtype", "unknown")).replace("torch.", "")
         # The base decoder (no lm_head) is what we forward through -- get_decoder() is
         # the transformers-standard accessor; fall back to the model itself (the tiny
         # test model exposes get_decoder too).
@@ -362,4 +368,5 @@ class ReplayModel:
             n_prompt_tokens=n_prompt_tokens,
             n_output_tokens=n_output_tokens,
             n_layers=self.n_layers,
+            dtype=self.dtype,
         )
