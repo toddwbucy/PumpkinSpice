@@ -9,7 +9,11 @@ buckets (per issue #8's instruction to keep #7 and #8 verdicts apart):
 #7 (trajectory geometry) -- three pre-registered AUC kill conditions:
   1. d_rho hard/easy separation on the AGENTIC (tool-use) turns; AUC < 0.7 -> dead.
   2. early-kinematics correctness AUC within each task type; AUC < 0.7 -> dead.
-  3. cross-task-type transfer of the kinematics probe; collapse toward 0.5 -> dead.
+  3. cross-task-type transfer of the kinematics probe; AUC < 0.7 -> dead. Note the
+     threshold check fires on BOTH collapse toward chance (0.5) AND inversion (AUC
+     near 0) -- the conservative reading: a probe that does not transfer, in either
+     direction, is not a transferring probe. (Flagged for the operationalization
+     sign-off, since #7's wording only names the collapse-to-chance case.)
 
 #8 (per-layer novelty) -- the rho_block / rho_MLP curves aggregated across turns,
 with a range/spread statistic and a "flat" flag; the kill ("flat or non-monotone
@@ -174,6 +178,7 @@ class RhoCurveSummary:
     rho_mlp_mean: list[float]
     block_range: float  # max - min of the mean block curve
     block_std: float
+    mlp_range: float  # max - min of the mean MLP curve (#8's kill reads both curves)
     flat: bool  # block_range < flat_range -> reads as structureless
 
 
@@ -220,6 +225,29 @@ def _by_type(turns: list[LabeledTurn]) -> dict[str, list[LabeledTurn]]:
     return out
 
 
+def _validate_corpus(turns: list[LabeledTurn]) -> None:
+    """Fail fast with an actionable message if the turns are not commensurable.
+
+    The labeled-metrics JSONL may be a concatenation of separate runs (PR 3b). All
+    turns must share ONE d_rho threshold set (else the probe columns misalign) and
+    ONE n_layers (else the rho-curve stack is ragged), so check both up front rather
+    than letting a bare KeyError or ragged-array ValueError surface deep in numpy.
+    """
+    thresholds = set(turns[0].metrics.d_rho)
+    n_layers = turns[0].metrics.n_layers
+    for i, t in enumerate(turns):
+        if set(t.metrics.d_rho) != thresholds:
+            raise ValueError(
+                f"turn {i}: d_rho thresholds {sorted(t.metrics.d_rho)} != "
+                f"{sorted(thresholds)} (all turns must share one threshold set)"
+            )
+        if t.metrics.n_layers != n_layers:
+            raise ValueError(
+                f"turn {i}: n_layers {t.metrics.n_layers} != {n_layers} "
+                "(cannot pool rho curves across models of different depth)"
+            )
+
+
 def evaluate_floor_test(
     turns: list[LabeledTurn],
     *,
@@ -231,6 +259,7 @@ def evaluate_floor_test(
     """Compute the #7 AUC kills and the #8 rho-curve diagnostic from labeled turns."""
     if not turns:
         raise ValueError("no turns to evaluate")
+    _validate_corpus(turns)
     grouped = _by_type(turns)
     n_by_type = {ty: len(v) for ty, v in grouped.items()}
     thresholds = sorted(turns[0].metrics.d_rho)
@@ -325,6 +354,7 @@ def _summarize_rho(turns: list[LabeledTurn], flat_range: float) -> RhoCurveSumma
         rho_mlp_mean=mlp_mean.tolist(),
         block_range=block_range,
         block_std=float(block_mean.std()),
+        mlp_range=float(mlp_mean.max() - mlp_mean.min()),
         flat=block_range < flat_range,
     )
 
@@ -432,6 +462,7 @@ def report_to_dict(r: FloorTestReport) -> dict[str, Any]:
             "rho_mlp_mean": r.rho_curves.rho_mlp_mean,
             "block_range": r.rho_curves.block_range,
             "block_std": r.rho_curves.block_std,
+            "mlp_range": r.rho_curves.mlp_range,
             "flat": r.rho_curves.flat,
         },
     }

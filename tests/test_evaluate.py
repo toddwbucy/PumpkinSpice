@@ -75,7 +75,7 @@ def _corpus(
         drho = (int(rng.integers(4, 6)),) * 3 if hard else (int(rng.integers(1, 3)),) * 3
         turns.append(
             LabeledTurn(task_type, correct, hard, _metrics(mean_speed=mean_speed, drho=drho))
-        )  # type: ignore[arg-type]
+        )
     return turns
 
 
@@ -173,3 +173,27 @@ def test_load_labeled_turns_and_cli(tmp_path) -> None:  # type: ignore[no-untype
 def test_empty_turns_raises() -> None:
     with pytest.raises(ValueError, match="no turns"):
         evaluate_floor_test([])
+
+
+def test_incommensurable_corpus_raises_actionably() -> None:
+    # mixed d_rho threshold sets -> actionable error, not a bare KeyError deep in numpy
+    a = LabeledTurn("t", True, False, _metrics(mean_speed=1.0))
+    b = LabeledTurn("t", False, True, _metrics(mean_speed=2.0))
+    object.__setattr__(b.metrics, "d_rho", {0.5: 1, 0.9: 2})  # drop the 0.75 threshold
+    with pytest.raises(ValueError, match="d_rho thresholds"):
+        evaluate_floor_test([a, b])
+
+    # mixed depths -> the rho-curve stack would be ragged; caught up front
+    c = LabeledTurn("t", True, False, _metrics(mean_speed=1.0, n_layers=6))
+    with pytest.raises(ValueError, match="n_layers"):
+        evaluate_floor_test([LabeledTurn("t", True, False, _metrics(mean_speed=1.0)), c])
+
+
+def test_rho_summary_reports_both_ranges() -> None:
+    turns = [
+        LabeledTurn("t", True, False, _metrics(mean_speed=1.0, rho_block=[0.9, 0.6, 0.3, 0.0]))
+    ]
+    rc = evaluate_floor_test(turns).rho_curves
+    assert rc is not None
+    assert rc.block_range == pytest.approx(0.9)
+    assert rc.mlp_range == pytest.approx(0.0)  # rho_mlp is all zeros in the fixture

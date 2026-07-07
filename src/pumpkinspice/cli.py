@@ -189,11 +189,21 @@ def _cmd_floortest(args: argparse.Namespace) -> int:
     replay step) and print the report; optionally write the JSON."""
     from .introspect import evaluate as ev
 
-    turns = ev.load_labeled_turns(args.metrics)
+    try:
+        turns = ev.load_labeled_turns(args.metrics)
+    except (OSError, json.JSONDecodeError, KeyError) as exc:
+        log.error("could not read labeled metrics %s: %s", args.metrics, exc)
+        return 2
     if not turns:
         log.error("no labeled turns in %s", args.metrics)
         return 2
-    report = ev.evaluate_floor_test(turns, agentic_type=args.agentic_type, threshold=args.threshold)
+    try:
+        report = ev.evaluate_floor_test(
+            turns, agentic_type=args.agentic_type, threshold=args.threshold
+        )
+    except ValueError as exc:  # e.g. incommensurable corpus
+        log.error("evaluation failed: %s", exc)
+        return 2
     print(report.summary())
     if args.json:
         Path(args.json).write_text(json.dumps(ev.report_to_dict(report), indent=2))
