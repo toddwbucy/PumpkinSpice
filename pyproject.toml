@@ -26,6 +26,9 @@ pgvector = ["psycopg[binary]>=3.1", "pgvector>=0.3"]
 arango = ["python-arango>=8.0"]
 web = ["fastapi>=0.115", "uvicorn[standard]>=0.30"]
 mcp = ["mcp>=1.0"]  # the MCP host for the agentic Chat (Phase 3a); optional
+# Offline trajectory-geometry metrics for the floor tests (issues #7, #8). numpy
+# only -- the heavy teacher-forced replay driver (torch/transformers) is separate.
+introspect = ["numpy>=1.26"]
 
 [project.urls]
 Homepage = "https://github.com/toddwbucy/pumpkinspice"
