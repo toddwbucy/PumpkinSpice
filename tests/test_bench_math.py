@@ -100,7 +100,9 @@ def test_grade_end_to_end() -> None:
     assert grade("no box", gold)[0] is False  # unparseable model output
 
 
-def _write_math(root, subject: str, name: str, *, problem: str, level: int, solution: str) -> None:  # type: ignore[no-untyped-def]
+def _write_math(  # type: ignore[no-untyped-def]
+    root, subject: str, name: str, *, problem: str, level: int, solution: str
+) -> None:
     d = root / subject
     d.mkdir(parents=True, exist_ok=True)
     (d / name).write_text(
@@ -126,6 +128,7 @@ def test_load_math_dir_filters_and_parses(tmp_path) -> None:  # type: ignore[no-
     assert {p.subject for p in alg} == {"Algebra"}
 
     assert len(load_math_dir(tmp_path, limit=1)) == 1
+    assert load_math_dir(tmp_path, limit=0) == []  # zero means zero, not one
 
 
 class _FakeDecoder:

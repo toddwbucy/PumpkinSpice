@@ -67,6 +67,10 @@ def load_math_dir(
     """
     problems: list[MathProblem] = []
     for path in sorted(Path(root).rglob("*.json")):
+        # Check the limit up front so limit=0 yields [] (not one item) and files past
+        # the cap are not even parsed.
+        if limit is not None and len(problems) >= limit:
+            break
         # Name the offending file: a MATH dir is thousands of JSONs, so a bare
         # JSONDecodeError / KeyError from one bad file is near-impossible to locate.
         try:
@@ -91,8 +95,6 @@ def load_math_dir(
                 subject=subject,
             )
         )
-        if limit is not None and len(problems) >= limit:
-            break
     return problems
 
 
