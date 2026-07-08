@@ -18,7 +18,9 @@ transformers = pytest.importorskip("transformers")
 
 from pumpkinspice.introspect.replay import (  # noqa: E402  (after importorskip)
     ReplayModel,
+    _find_base_model,
     _find_decoder_layers,
+    normalize_dtype,
 )
 
 
@@ -48,6 +50,7 @@ def test_replay_produces_wellformed_metrics() -> None:
     assert m.n_prompt_tokens == 3
     assert m.n_output_tokens == 6
     assert m.n_layers == 2
+    assert m.dtype == "float32"  # provenance: the tiny model loads at float32
 
     # d_rho: one entry per default threshold, each a count within the span length.
     assert set(m.d_rho) == {0.5, 0.75, 0.9}
@@ -108,6 +111,34 @@ def test_input_validation() -> None:
     rm.close()
 
 
+def test_normalize_dtype_strips_torch_prefix() -> None:
+    assert normalize_dtype("torch.bfloat16") == "bfloat16"
+    assert normalize_dtype(torch.float32) == "float32"
+    assert normalize_dtype("bfloat16") == "bfloat16"  # idempotent
+
+
+def test_find_base_model_prefers_real_decoder_and_falls_back() -> None:
+    # Standard layout: get_decoder() returns the LlamaModel (no lm_head), not the LM.
+    model = _tiny_llama()
+    assert _find_base_model(model) is model.model
+
+    # Nonconforming model whose get_decoder() returns itself and has no layers parent:
+    # must fall back to the model itself (with a warning), not crash.
+    class _SelfDecoder:
+        def get_decoder(self) -> object:
+            return self
+
+    obj = _SelfDecoder()
+    assert _find_base_model(obj) is obj
+
+    # Middle branch: no get_decoder(), but a legacy layers-parent attribute
+    # (GPT-2 "transformer.h" here) -- resolve to that, not the full object.
+    import types
+
+    legacy = types.SimpleNamespace(transformer=types.SimpleNamespace(h=[object(), object()]))
+    assert _find_base_model(legacy) is legacy.transformer
+
+
 def test_find_decoder_layers_llama_and_unknown() -> None:
     model = _tiny_llama()
     assert len(_find_decoder_layers(model)) == 2
@@ -127,7 +158,12 @@ def test_missing_mlp_submodule_raises_and_cleans_up() -> None:
 
 
 class _FakeTok:
-    """Minimal tokenizer: 1 token per character, ids in-vocab (1..31)."""
+    """Minimal tokenizer: 1 token per character, ids in-vocab (1..31).
+
+    Models a REAL tokenizer's chat path: apply_chat_template(tokenize=False) renders
+    to a STRING (here a 2-char '>' + content marker), which the driver then tokenizes
+    -- NOT the id list a too-kind fake would return directly (that masked the
+    BatchEncoding/string bug that only a real tokenizer exposes)."""
 
     def __init__(self, chat_template: str | None = None) -> None:
         self.chat_template = chat_template
@@ -136,9 +172,12 @@ class _FakeTok:
         return {"input_ids": [(ord(c) % 31) + 1 for c in text]}
 
     def apply_chat_template(
-        self, messages: list[dict[str, str]], add_generation_prompt: bool = True
-    ) -> list[int]:
-        return self(messages[0]["content"])["input_ids"]
+        self,
+        messages: list[dict[str, str]],
+        add_generation_prompt: bool = True,
+        tokenize: bool = False,
+    ) -> str:
+        return ">>" + messages[0]["content"]  # rendered template string, not ids
 
 
 def test_replay_plain_tokenizer_path() -> None:
@@ -150,9 +189,11 @@ def test_replay_plain_tokenizer_path() -> None:
 
 
 def test_replay_chat_template_path() -> None:
-    # A non-empty chat_template routes _encode through apply_chat_template.
+    # A non-empty chat_template routes _encode through apply_chat_template, which
+    # renders to a string that is then tokenized: ">>hey" -> 5 prompt tokens. (A
+    # regression here catches the apply_chat_template-returns-a-string bug.)
     rm = ReplayModel(_tiny_llama(), tokenizer=_FakeTok(chat_template="tmpl"))
     m = rm.replay("hey", "abcdef")
-    assert m.n_prompt_tokens == 3  # apply_chat_template mapped the 3-char content
+    assert m.n_prompt_tokens == 5  # 2-char ">>" marker + 3-char content, tokenized
     assert m.n_output_tokens == 6
     rm.close()

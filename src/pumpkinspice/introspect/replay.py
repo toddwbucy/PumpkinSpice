@@ -44,6 +44,7 @@ lazily, so importing this module -- or using geometry.py -- costs nothing withou
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -57,8 +58,40 @@ from pumpkinspice.introspect.geometry import (
     mean_token_cosine,
 )
 
+log = logging.getLogger(__name__)
+
 TrajectorySpan = Literal["output", "full"]
 MlpResidual = Literal["block_in", "mlp_in"]
+
+# Provenance sentinel for metrics produced before dtype was recorded. Defined once so
+# renaming it can't silently partition legacy rows (it is compared in the evaluator).
+UNKNOWN_DTYPE = "unknown"
+
+
+def normalize_dtype(dtype: Any) -> str:
+    """Canonical dtype string, e.g. torch.bfloat16 / 'torch.bfloat16' -> 'bfloat16'.
+    One normalizer used at both the capture and deserialization sites so a
+    'torch.bfloat16' and a 'bfloat16' from the same replay are not seen as a mismatch."""
+    return str(dtype).replace("torch.", "")
+
+
+def _find_base_model(model: Any) -> Any:
+    """The base decoder (no lm_head) to forward through, so the [seq, vocab] logits are
+    not computed. Prefer get_decoder(); in transformers >=4.53 its last-resort branch
+    returns the model ITSELF (lm_head attached), so fall back to the layers' parent, and
+    warn if even that fails (forwarding the full LM reintroduces the logits allocation)."""
+    base = model.get_decoder() if hasattr(model, "get_decoder") else None
+    if base is not None and base is not model:
+        return base
+    for attr in ("model", "transformer", "gpt_neox"):
+        cand = getattr(model, attr, None)
+        if cand is not None and (hasattr(cand, "layers") or hasattr(cand, "h")):
+            return cand
+    log.warning(
+        "could not isolate the base decoder; forwarding the full LM -- its lm_head "
+        "computes [seq, vocab] logits (higher memory on long sequences)"
+    )
+    return model
 
 
 @dataclass(frozen=True)
@@ -77,6 +110,10 @@ class TrajectoryMetrics:
     n_prompt_tokens: int
     n_output_tokens: int
     n_layers: int
+    # Load dtype the forward ran at (bf16 vs fp32 perturb d_rho/rho ~0.3%). Recorded
+    # as provenance so a floor-test corpus cannot silently pool incommensurable
+    # precisions; the evaluator rejects a mix. Default marks pre-provenance metrics.
+    dtype: str = UNKNOWN_DTYPE
 
 
 def _find_decoder_layers(model: Any) -> Any:
@@ -139,6 +176,10 @@ class ReplayModel:
         self.chat_template = chat_template
 
         model.eval()
+        # Provenance: the parameter dtype the forward runs at (e.g. "bfloat16").
+        self.dtype = normalize_dtype(getattr(model, "dtype", UNKNOWN_DTYPE))
+        # The base decoder (no lm_head) is what we forward through.
+        self._base = _find_base_model(model)
         layers = _find_decoder_layers(model)
         self.n_layers = len(layers)
         # Per-forward caches, cleared at the start of every replay: the residual
@@ -146,6 +187,9 @@ class ReplayModel:
         self._block_in: Any = None
         self._block_out: dict[int, Any] = {}
         self._mlp_out: dict[int, Any] = {}
+        # Span start (set per-forward): hooks offload only tensor[:, lo:], so the prompt
+        # rows every consumer would slice off under span="output" are never copied to host.
+        self._lo: int = 0
         self._handles: list[Any] = []
         # Pre-hook on layer 0 captures the true embeddings fed to the stack (post any
         # architecture-specific scaling), which output_hidden_states[0] would also give
@@ -161,21 +205,30 @@ class ReplayModel:
             self._handles.append(layer.register_forward_hook(self._make_block_hook(idx)))
             self._handles.append(mlp.register_forward_hook(self._make_mlp_hook(idx)))
 
+    def _offload(self, tensor: Any) -> Any:
+        # Copy the captured tensor to host RAM immediately (sliced to the trajectory
+        # span). Otherwise every layer's block + MLP output would accumulate on the GPU
+        # for the whole forward, and a long trajectory (36 layers x thousands of tokens x
+        # hidden) OOMs even a 48GB card. Slicing to [:, lo:] here also drops the prompt
+        # rows every consumer would discard under span="output" -- ~80% of the D2H copy
+        # and host RAM on a typical RAG capture. The copy leaves the original on-device.
+        return None if tensor is None else tensor[:, self._lo :].detach().to("cpu")
+
     def _block_in_hook(self, _module: Any, args: Any, kwargs: Any) -> None:
         # Decoder layers receive hidden_states as the first positional arg (or, rarely,
         # as a kwarg); handle both so this does not depend on the call convention.
-        self._block_in = args[0] if args else kwargs.get("hidden_states")
+        self._block_in = self._offload(args[0] if args else kwargs.get("hidden_states"))
 
     def _make_block_hook(self, idx: int) -> Any:
         def hook(_module: Any, _inputs: Any, output: Any) -> None:
-            self._block_out[idx] = output[0] if isinstance(output, tuple) else output
+            self._block_out[idx] = self._offload(output[0] if isinstance(output, tuple) else output)
 
         return hook
 
     def _make_mlp_hook(self, idx: int) -> Any:
         def hook(_module: Any, _inputs: Any, output: Any) -> None:
             # Some MLP modules return a tuple; the update tensor is the first element.
-            self._mlp_out[idx] = output[0] if isinstance(output, tuple) else output
+            self._mlp_out[idx] = self._offload(output[0] if isinstance(output, tuple) else output)
 
         return hook
 
@@ -220,15 +273,33 @@ class ReplayModel:
                 "(uv sync --extra replay)"
             ) from exc
 
-        load_kw: dict[str, Any] = {"torch_dtype": getattr(torch, dtype), **(load_kwargs or {})}
+        # `dtype`, not `torch_dtype`: transformers 5.x deprecated torch_dtype (it warns,
+        # and a future removal would silently no-op -- loading at checkpoint dtype, making
+        # --dtype a lie detectable only post-replay). Default attn to SDPA (O(seq) memory;
+        # eager materializes the full seq x seq scores and OOMs a 10k-token trace), unless
+        # the caller set one via load_kwargs.
+        load_kw: dict[str, Any] = {"dtype": getattr(torch, dtype), **(load_kwargs or {})}
+        load_kw.setdefault("attn_implementation", "sdpa")
         tok_kw: dict[str, Any] = {}
         if gguf_file is not None:
             load_kw["gguf_file"] = gguf_file
             tok_kw["gguf_file"] = gguf_file
         # Kept Any: transformers ships partial types whose .to() overloads misfire on
         # a str device; the driver treats these objects as untyped by design.
-        model: Any = transformers.AutoModelForCausalLM.from_pretrained(model_id, **load_kw)
-        model.to(device)
+        try:
+            model: Any = transformers.AutoModelForCausalLM.from_pretrained(model_id, **load_kw)
+        except (ValueError, ImportError):
+            # transformers 5.x re-raises for an architecture that rejects an explicitly
+            # requested attention impl. If it was our SDPA default, retry with eager
+            # (loses the seq-memory win but loads); an explicit choice is left to fail.
+            if load_kw.get("attn_implementation") != "sdpa":
+                raise
+            load_kw["attn_implementation"] = "eager"
+            model = transformers.AutoModelForCausalLM.from_pretrained(model_id, **load_kw)
+        # device_map dispatches via accelerate hooks; .to(device) then raises "can't move
+        # a model dispatched using accelerate hooks", so skip it for the big-model path.
+        if "device_map" not in load_kw:
+            model.to(device)
         tokenizer: Any = transformers.AutoTokenizer.from_pretrained(model_id, **tok_kw)
         return cls(model, tokenizer, **kwargs)
 
@@ -246,15 +317,28 @@ class ReplayModel:
 
         if self.chat_template and getattr(self.tokenizer, "chat_template", None):
             # Reproduce what the model actually processed: the chat wrapper the decoder's
-            # /v1/chat/completions server applied around the user content.
-            prompt_ids = self.tokenizer.apply_chat_template(
-                [{"role": "user", "content": prompt}], add_generation_prompt=True
+            # /v1/chat/completions server applied around the user content. Render the
+            # template to a STRING then tokenize it (add_special_tokens=False -- the
+            # template already emits BOS/role markers). This is what the vLLM server does
+            # internally, and unlike apply_chat_template(tokenize=True) -- which in recent
+            # transformers returns a BatchEncoding of Encoding objects, not a flat id list
+            # -- it yields a plain list[int] across versions.
+            text = self.tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}], add_generation_prompt=True, tokenize=False
             )
+            prompt_ids = self.tokenizer(str(text), add_special_tokens=False)["input_ids"]
         else:
             prompt_ids = self.tokenizer(prompt, add_special_tokens=True)["input_ids"]
         output_ids = self.tokenizer(output, add_special_tokens=False)["input_ids"]
         input_ids = torch.tensor([list(prompt_ids) + list(output_ids)], device=self.model.device)
         return input_ids, len(prompt_ids)
+
+    def encode(self, prompt: str, output: str) -> tuple[Any, int]:
+        """Public teacher-forced encode: ``(input_ids, n_prompt_tokens)`` WITHOUT the
+        forward pass. Lets a caller check prompt-token parity cheaply and skip a drifted
+        turn before paying the (expensive, hook-capturing) forward -- then hand the same
+        ids to ``replay_token_ids`` so encoding is not repeated."""
+        return self._encode(prompt, output)
 
     def replay(self, prompt: str, output: str) -> TrajectoryMetrics:
         """Replay one recorded turn. ``output`` is the full generated text to force
@@ -277,11 +361,24 @@ class ReplayModel:
         if not 0 <= n_prompt_tokens <= seq_len:
             raise ValueError(f"n_prompt_tokens must be in [0, {seq_len}]; got {n_prompt_tokens}")
 
+        # Span start, set BEFORE the forward so the hooks offload only tensor[:, lo:].
+        self._lo = n_prompt_tokens if self.trajectory_span == "output" else 0
+        if seq_len - self._lo < 2:
+            raise ValueError(
+                f"trajectory span has {seq_len - self._lo} token(s); need >= 2 for "
+                f"velocity/covariance (span={self.trajectory_span!r}, prompt={n_prompt_tokens}, "
+                f"seq={seq_len})"
+            )
+
         self._block_in = None
         self._block_out.clear()
         self._mlp_out.clear()
         with torch.no_grad():
-            self.model(input_ids=input_ids, use_cache=False)
+            # Run the base decoder, NOT the full CausalLM: the lm_head projects the whole
+            # sequence to [seq, vocab] logits (~15GB for a 10k-token trace over a 150k
+            # vocab) that we never use -- we read the residual stream via hooks. The base
+            # model still runs every layer, so all hooks fire.
+            self._base(input_ids=input_ids, use_cache=False)
         if (
             self._block_in is None
             or len(self._block_out) != self.n_layers
@@ -293,35 +390,28 @@ class ReplayModel:
             )
 
         n_output_tokens = seq_len - n_prompt_tokens
-        lo = n_prompt_tokens if self.trajectory_span == "output" else 0
-        if seq_len - lo < 2:
-            raise ValueError(
-                f"trajectory span has {seq_len - lo} token(s); need >= 2 for velocity/covariance "
-                f"(span={self.trajectory_span!r}, prompt={n_prompt_tokens}, seq={seq_len})"
-            )
-
+        # The hooks already sliced to [lo:], so these arrays span the trajectory only.
         block_out = {i: _to_numpy(self._block_out[i]) for i in range(self.n_layers)}
         embeddings = _to_numpy(self._block_in)
 
         # #7 trajectory: the TRUE final block output (pre-final-norm residual). See class docs.
-        final = block_out[self.n_layers - 1][lo:]
+        final = block_out[self.n_layers - 1]
         d_rho = {rho: effective_dimension(final, rho) for rho in self.rho_thresholds}
         kinematics = early_kinematics(final, self.kinematics_fraction)
 
         rho_block = np.empty(self.n_layers, dtype=np.float64)
         rho_mlp = np.empty(self.n_layers, dtype=np.float64)
-        prev = embeddings  # residual entering layer 0
+        prev = embeddings  # residual entering layer 0 (already [lo:])
         for i in range(self.n_layers):
-            cur = block_out[i]  # residual leaving layer i (pre-norm, from the hook)
-            h_in, h_out = prev[lo:], cur[lo:]
+            h_in, h_out = prev, block_out[i]  # residual leaving layer i (pre-norm, from the hook)
             delta_block = h_out - h_in
-            delta_mlp = _to_numpy(self._mlp_out[i])[lo:]
+            delta_mlp = _to_numpy(self._mlp_out[i])
             # "block_in": novelty vs the residual entering the whole block (#8's literal
             # phrasing). "mlp_in": vs the residual entering the MLP sublayer, h_out - delta_mlp.
             residual = h_in if self.mlp_residual == "block_in" else (h_out - delta_mlp)
             rho_block[i] = mean_token_cosine(delta_block, h_in)
             rho_mlp[i] = mean_token_cosine(delta_mlp, residual)
-            prev = cur
+            prev = h_out
 
         return TrajectoryMetrics(
             d_rho=d_rho,
@@ -331,4 +421,5 @@ class ReplayModel:
             n_prompt_tokens=n_prompt_tokens,
             n_output_tokens=n_output_tokens,
             n_layers=self.n_layers,
+            dtype=self.dtype,
         )

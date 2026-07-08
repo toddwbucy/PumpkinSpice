@@ -34,6 +34,7 @@ def _metrics(
     drho: tuple[int, int, int] = (1, 2, 3),
     n_layers: int = 4,
     rho_block: list[float] | None = None,
+    dtype: str = "bfloat16",
 ) -> TrajectoryMetrics:
     d = 4
     kin = EarlyKinematics(
@@ -57,6 +58,7 @@ def _metrics(
         n_prompt_tokens=3,
         n_output_tokens=5,
         n_layers=n_layers,
+        dtype=dtype,
     )
 
 
@@ -151,6 +153,7 @@ def test_serialization_round_trip() -> None:
     assert back.metrics.d_rho == turn.metrics.d_rho
     assert np.allclose(back.metrics.rho_block, turn.metrics.rho_block)
     assert back.metrics.kinematics.mean_speed == turn.metrics.kinematics.mean_speed
+    assert back.metrics.dtype == turn.metrics.dtype  # provenance survives serialization
 
 
 def test_load_labeled_turns_and_cli(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -187,6 +190,21 @@ def test_incommensurable_corpus_raises_actionably() -> None:
     c = LabeledTurn("t", True, False, _metrics(mean_speed=1.0, n_layers=6))
     with pytest.raises(ValueError, match="n_layers"):
         evaluate_floor_test([LabeledTurn("t", True, False, _metrics(mean_speed=1.0)), c])
+
+    # mixed KNOWN replay dtype -> bf16 and fp32 perturb the geometry; refuse to pool them
+    fp = LabeledTurn("t", True, False, _metrics(mean_speed=1.0, dtype="float32"))
+    bf = LabeledTurn("t", False, True, _metrics(mean_speed=2.0, dtype="bfloat16"))
+    with pytest.raises(ValueError, match="replay dtype"):
+        evaluate_floor_test([fp, bf])
+
+
+def test_unknown_dtype_is_unverified_not_blocking() -> None:
+    # 'unknown' (pre-provenance) must not be matched by equality: it should neither block
+    # extending a float32 corpus nor silently pool -- it warns and is exempt from the check.
+    turns = _corpus("tool_use", 20)
+    for i, t in enumerate(turns):
+        object.__setattr__(t.metrics, "dtype", "float32" if i % 2 else "unknown")
+    evaluate_floor_test(turns)  # float32 + unknown: must NOT raise (unknown is unverified)
 
 
 def test_rho_summary_reports_both_ranges() -> None:
