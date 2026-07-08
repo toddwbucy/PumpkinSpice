@@ -30,8 +30,8 @@ top_k        = 6
 dsn_env      = "PUMPKINSPICE_PG_DSN"
 table        = "kg.belief_nodes"
 relational   = true
-embed_url    = "http://localhost:1234"
-embed_model  = "text-embedding-nomic-embed-text-v1.5"
+embed_url    = "http://localhost:11434"
+embed_model  = "nomic-embed-text"
 
 [world]
 base_url  = "http://127.0.0.1:8000"

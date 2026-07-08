@@ -24,6 +24,7 @@ from starlette.types import Scope
 
 from .. import __version__, kernel
 from ..config import RunConfig, load_config
+from ..embeddings import DEFAULT_EMBED_MODEL, DEFAULT_EMBED_URL
 from ..reporting import RunRegistry
 from .mcp_host import McpHost
 from .mcp_servers import McpServer, McpServerStore
@@ -39,8 +40,11 @@ BACKENDS = {
     "ollama": "http://localhost:11434",
     "vllm": "http://localhost:8000",
 }
-EMBED_URL = LMSTUDIO_URL
-EMBED_MODEL = "text-embedding-nomic-embed-text-v1.5"
+# Embeddings are decoupled from the decoder (no LMStudio GUI). Both are env-overridable
+# as a UNIT (a URL pointing at a server that lacks `nomic-embed-text` needs the model
+# override too); default to headless Ollama.
+EMBED_URL = os.environ.get("PUMPKINSPICE_EMBED_URL", DEFAULT_EMBED_URL)
+EMBED_MODEL = os.environ.get("PUMPKINSPICE_EMBED_MODEL", DEFAULT_EMBED_MODEL)
 HEROBENCH_URL = "http://127.0.0.1:8000"
 _MAX_TOOL_ROUNDS = 8  # cap the agentic Chat tool loop (Phase 3a)
 

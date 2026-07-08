@@ -27,6 +27,7 @@ from typing import Any
 import httpx
 
 from ..contracts import BeliefNode, RetrievalResult
+from ..embeddings import DEFAULT_EMBED_MODEL, DEFAULT_EMBED_URL, embed_query, warm_up
 
 # Exact cosine top-k. Distances computed against the stored embedding array.
 _AQL = """
@@ -62,9 +63,10 @@ class ArangoRetrieval:
                 "arango retrieval must not run as root; use the scoped read-only user."
             )
 
-        self.embed_url = str(config.get("embed_url", "http://192.168.0.203:1234")).rstrip("/")
-        self.embed_model = config.get("embed_model")
+        self.embed_url = str(config.get("embed_url", DEFAULT_EMBED_URL)).rstrip("/")
+        self.embed_model = config.get("embed_model", DEFAULT_EMBED_MODEL)
         self._embed_client = httpx.Client(base_url=self.embed_url, timeout=60.0)
+        warm_up(self._embed_client, self.embed_model)  # avoid cold-start in latency
 
         try:
             from arango import ArangoClient
@@ -77,12 +79,7 @@ class ArangoRetrieval:
         )
 
     def _embed(self, query: str) -> list[float]:
-        payload: dict[str, Any] = {"input": query}
-        if self.embed_model:
-            payload["model"] = self.embed_model
-        resp = self._embed_client.post("/v1/embeddings", json=payload)
-        resp.raise_for_status()
-        return [float(x) for x in resp.json()["data"][0]["embedding"]]
+        return embed_query(self._embed_client, self.embed_model, query)
 
     def retrieve(self, query: str, *, top_k: int) -> RetrievalResult:
         t0 = time.perf_counter()

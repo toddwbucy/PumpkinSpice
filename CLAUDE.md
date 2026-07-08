@@ -10,7 +10,7 @@ contracts (`contracts.py`), the RAG loop (`loop.py`), CLI (`cli.py`), and built-
 offline run (`echo`/`null`/`mock`) and a live `lmstudio` decoder run both work end to end and write
 JSONL captures. The pgvector backend is provisioned and seeded: `scripts/bootstrap_pg.py` creates
 the `herobench_kg` DB, `kg.belief_nodes` table, and least-privilege roles; `scripts/seed_corpus.py`
-fills it with 302 belief nodes from the HeroBench encyclopedia. Both retrieval arms (`pgvector` and
+fills it with 305 belief nodes from the HeroBench encyclopedia. Both retrieval arms (`pgvector` and
 `arango`) are provisioned, seeded, and validated end to end against the live HeroBench world. The
 decoder-parity gate (`pumpkinspice parity`, spec s4) and transport micro-benchmark
 (`pumpkinspice transport`, spec s5) are implemented and validated live (greedy decode is
@@ -55,7 +55,8 @@ uv run pytest tests/test_config_cli.py::test_cli_run_offline --no-cov  # single 
 Tests use `httpx.MockTransport` / fakes, so they need no live services. The
 pgvector tests `importorskip` and run only with the `pgvector` extra (CI installs it).
 
-Build-side corpus seeding + a real retrieval run (admin/build-side, needs the DBs + LMStudio):
+Build-side corpus seeding + a real retrieval run (admin/build-side; seeding needs the DBs +
+Ollama for embeddings; a live decoder is only needed for the final `run` step):
 
 ```bash
 uv run --extra pgvector python scripts/bootstrap_pg.py          # provision DB + scoped roles
@@ -246,6 +247,15 @@ small) differ. Do not introduce any other difference.
   localhost. Note this for spec section 5's transport benchmark, which assumes a localhost path.
 - **Retrieval backends:** ArangoDB at `localhost:8529` (plain HTTP, needs auth) and Postgres/
   pgvector at `localhost:5432`. Both confirmed reachable.
+- **Embeddings:** headless **Ollama** at `http://localhost:11434` serving `nomic-embed-text`
+  (768-dim), the default for retrieval and both seeders (defined once in
+  `pumpkinspice/embeddings.py`). Decoupled from the decoder so no LMStudio GUI is needed; the web
+  backend overrides via `PUMPKINSPICE_EMBED_URL` / `PUMPKINSPICE_EMBED_MODEL` (as a unit). It MUST
+  match the model that seeded the corpus -- if you change the embedder, re-run BOTH
+  `seed_corpus.py` (pgvector) AND `seed_corpus_arango.py` (arango), since query and document
+  vectors must share one space per arm (a 768-dim mismatch degrades silently, no error). For
+  scored latency runs set `OLLAMA_KEEP_ALIVE=-1` so an idle model reload is not billed into
+  retrieval latency.
 - **Model selection and the run matrix** are the experiment document's to fix, not this repo's.
 
 ## Out of scope (spec section 8)

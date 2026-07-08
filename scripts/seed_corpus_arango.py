@@ -26,6 +26,7 @@ from arango import ArangoClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from pumpkinspice.corpus import CorpusNode, load_corpus
+from pumpkinspice.embeddings import DEFAULT_EMBED_MODEL, DEFAULT_EMBED_URL
 
 DEFAULT_DATA_DIR = Path.home() / "git/HeroBench/Virtual_Environment/Data"
 
@@ -43,8 +44,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--url", default=os.environ.get("ARANGO_URL", "http://localhost:8529"))
     ap.add_argument("--db", default="herobench_kg")
     ap.add_argument("--collection", default="belief_nodes")
-    ap.add_argument("--embed-url", default="http://192.168.0.203:1234")
-    ap.add_argument("--embed-model", default="text-embedding-nomic-embed-text-v1.5")
+    ap.add_argument("--embed-url", default=DEFAULT_EMBED_URL)
+    ap.add_argument("--embed-model", default=DEFAULT_EMBED_MODEL)
     ap.add_argument("--batch-size", type=int, default=32)
     args = ap.parse_args(argv)
 

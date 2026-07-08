@@ -29,6 +29,7 @@ from psycopg.types.json import Jsonb
 # Make the package importable when run as a plain script.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from pumpkinspice.corpus import CorpusNode, load_corpus
+from pumpkinspice.embeddings import DEFAULT_EMBED_MODEL, DEFAULT_EMBED_URL
 
 DEFAULT_DATA_DIR = Path.home() / "git/HeroBench/Virtual_Environment/Data"
 UPSERT = """
@@ -52,8 +53,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     ap.add_argument("--dsn-env", default="PUMPKINSPICE_PG_LOADER_DSN")
-    ap.add_argument("--embed-url", default="http://192.168.0.203:1234")
-    ap.add_argument("--embed-model", default="text-embedding-nomic-embed-text-v1.5")
+    ap.add_argument("--embed-url", default=DEFAULT_EMBED_URL)
+    ap.add_argument("--embed-model", default=DEFAULT_EMBED_MODEL)
     ap.add_argument("--batch-size", type=int, default=32)
     args = ap.parse_args(argv)
 

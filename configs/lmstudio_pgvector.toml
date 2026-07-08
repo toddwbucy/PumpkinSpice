@@ -1,8 +1,8 @@
 # Real run template: LMStudio decoder + pgvector retrieval + live HeroBench.
 # Requires: the pgvector extra (uv sync --extra pgvector), a seeded belief_nodes
-# table, an embedding model in LMStudio, a running HeroBench server, and a
-# SCOPED READ-ONLY Postgres DSN exported as $PUMPKINSPICE_PG_DSN
-# (never the root POSTGRESQL_PASSWORD).
+# table, a running HeroBench server, headless Ollama on :11434 serving nomic-embed-text
+# (the embeddings backend -- see [retrieval] below), and a SCOPED READ-ONLY Postgres
+# DSN exported as $PUMPKINSPICE_PG_DSN (never the root POSTGRESQL_PASSWORD).
 #   uv run --extra pgvector pumpkinspice run --config configs/lmstudio_pgvector.toml
 
 [run]
@@ -29,7 +29,7 @@ dsn_env      = "PUMPKINSPICE_PG_DSN"   # scoped, read-only
 table        = "belief_nodes"
 text_column  = "text"
 vector_column = "embedding"
-embed_url    = "http://localhost:1234"
+embed_url    = "http://localhost:11434"
 # embed_model = "nomic-embed-text"
 
 [world]
