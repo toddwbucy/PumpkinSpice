@@ -131,9 +131,60 @@ CV + per-episode aggregation in the evaluator; (e) reasoning-arm difficulty cont
   length proxy and should be dropped (or redefined length-invariant).
 - #8 (depth structure) is evaluated separately and has held up clean so far.
 
-## 8. Open decisions
+## 8. Resolved decisions (operator-approved)
 
-1. Target episodes per arm (300-400 defensible vs 200 cheaper).
-2. Task pool size and grading (how many tasks per difficulty bin).
-3. Whether to keep the internal-CoT arm as a comparison baseline (needs the slow replay).
-4. Exact "representative step" definition (first planning turn vs first N steps).
+1. **Episodes/arm:** ~360 (40 x 9 tasks) on the externalized arm; internal-CoT baseline ~120
+   (matched subset -- the on/off contrast needs matched N, not full scale).
+2. **Task ladder:** 4 bins x ~3 ways (concrete set in 8.1). Goals are **capability milestones**
+   (defeat monster M), not XP levels -- leveling happens along the way but the scored goal is
+   capability, which carries the planning content.
+3. **Keep the internal-CoT arm** as a baseline: reasoning on/off is a clean factorial IV
+   (same task/model, first-plan trajectory measured with thinking on vs externalized).
+4. **Representative step = the FIRST planning turn** (matches the reasoning arm's
+   one-generation-one-trajectory structure; the initial plan stands for the episode).
+5. **ICL is DEFERRED to WeaverTools.** The v2 baseline is ICL-free: the harness sets state,
+   the model plans cold from the observed state, no worked example in context. An in-context
+   demonstration would confound the geometry (imitation + demo-relevance) and can trivialize
+   correctness; it is Agent-1 / WeaverTools territory, not the conventional-RAG control.
+6. **Context: bounded, NOT max.** The measured first-plan turn has a small, uniform context
+   (state + retrieval + instruction). Generation cap differs by arm -- externalized ~512-1024
+   (bounded plan/action), internal ~8-16k (room to think); that difference IS the on/off
+   contrast. vLLM `--max-model-len ~32768`. Episode-*play* uses bounded history so the agent
+   can adapt to its own observed failures (in-context working memory, not ICL); the
+   *measurement* context stays small. On failure mid-episode the agent retries WITH the
+   failure in context (ReAct/replan); no context reload.
+
+### 8.1 The concrete task ladder (difficulty = element-match x level-for-damage)
+
+Verified mechanics: damage = weapon attack value (`wooden_stick` earth 4, `copper_dagger` air 8,
+`iron_dagger` air 24 but level 10), reduced by resistance; fights have a round cap, so
+insufficient damage-per-round means you survive but never close the kill ("turtle"). Better
+weapons are level-gated (character level to equip + crafting-skill level to craft). So higher
+bins require BOTH the counter-element AND leveling (character HP + crafting skill), not gear at L1.
+
+| bin | goal (capability milestone) | resist / gate | ways (multi-task per bin) |
+| --- | --- | --- | --- |
+| 0 anchor (scripted) | kill chicken (L1) + cook | none; stick earth 4 works | harness-executed; positive control |
+| 1 | beat yellow_slime (L2, 70hp) | earth-resist -> craft copper_dagger (air 8), doable at L1 | craft-air / grind-out-level / gear+cook |
+| 2 | beat green_slime (L4, 80hp) | air-resist -> dagger now resisted, L1 gear too weak -> MUST level | level+craft counter-element / out-level / armor+consumable |
+| 3 | beat blue/red slime (L6/7) or cow (L8) | multi-element + high HP | full chain / grind+gear / mixed |
+
+Bin 1 is element-only (pure planning at L1); bins 2-3 fuse element-match with leveling. The
+"out-level" way is the deliberate low-planning path in each bin -- the guard so difficulty
+cannot be read off activity type (see 4.3 rationale). Frontier calibration (4.5) finds each
+model's ~50% bin empirically -- that is exactly where the level x gear gate bites for that model.
+
+**Preamble (bin 0, harness-executed, NOT in model context):** move to a chicken, fight it, cook
+the `raw_chicken`, heal -> every measured episode starts fed/armed at a known L1 baseline.
+
+## 9. Build sequence (PR plan)
+
+1. This spec (finalized decisions + ladder).
+2. Externalized ReAct prompt strategy (thinking off, bounded think->act step) + a Qwen3
+   no-think decode flag.
+3. v2 task ladder as data + the harness-executed preamble (state setup, not in context).
+4. Walking-skeleton smoke test: one task, a few stochastic episodes, end to end.
+5. Stochastic per-episode runner (temperature 0.7, N episodes/task) + per-episode first-plan
+   metric + episode-outcome labels.
+6. Grouped CV in the evaluator (group by episode for correctness, by task for difficulty).
+7. Frontier calibration pass + full runs (8B then 14B) + the internal-CoT baseline subset.
