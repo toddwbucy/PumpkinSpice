@@ -49,6 +49,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--batch-size", type=int, default=32)
     args = ap.parse_args(argv)
 
+    if not args.embed_model:
+        # A falsy model gets stamped as "" and then reads back as "unstamped", silently
+        # disabling the provenance check on the corpus it produced.
+        print(
+            "error: --embed-model must be non-empty (it is stamped into the corpus).",
+            file=sys.stderr,
+        )
+        return 1
+
     user = os.environ.get("ARANGO_LOADER_USER")
     password = os.environ.get("ARANGO_LOADER_PASSWORD")
     if not user or not password:

@@ -8,7 +8,7 @@ import pytest
 from pumpkinspice.embeddings import (
     DEFAULT_EMBED_MODEL,
     DEFAULT_EMBED_URL,
-    assert_embed_model_matches,
+    check_embed_provenance,
     embed_query,
     warm_up,
 )
@@ -58,8 +58,45 @@ def test_warm_up_swallows_a_down_endpoint() -> None:
     warm_up(_client(handler), "nomic-embed-text")  # must not raise
 
 
-def test_assert_embed_model_matches() -> None:
-    assert_embed_model_matches("nomic-embed-text", "nomic-embed-text")  # match: ok
-    assert_embed_model_matches(None, "nomic-embed-text")  # unstamped corpus: skip
+def _fetch(stamps: list[str], dim: int | None = 3):  # type: ignore[no-untyped-def]
+    return lambda: (stamps, dim)
+
+
+def test_provenance_passes_on_match_and_unstamped() -> None:
+    check_embed_provenance(_fetch(["nomic-embed-text"]), "nomic-embed-text", 3)  # match
+    check_embed_provenance(_fetch([]), "nomic-embed-text", 3)  # unstamped legacy corpus
+    check_embed_provenance(_fetch(["x"]), None, 3)  # falsy configured = server-picks -> skip
+
+
+def test_provenance_raises_on_name_mismatch() -> None:
     with pytest.raises(ValueError, match="embed-model mismatch"):
-        assert_embed_model_matches("text-embedding-nomic-embed-text-v1.5", "nomic-embed-text")
+        check_embed_provenance(_fetch(["nomic-embed-text"]), "text-embedding-nomic-v1.5", 3)
+
+
+def test_provenance_raises_on_mixed_corpus() -> None:
+    with pytest.raises(ValueError, match="MIXED embed models"):
+        check_embed_provenance(_fetch(["nomic-embed-text", "old-model"]), "nomic-embed-text", 3)
+
+
+def test_provenance_raises_on_dimension_mismatch() -> None:
+    # dimension is checked first and is name-independent
+    with pytest.raises(ValueError, match="DIMENSION mismatch"):
+        check_embed_provenance(_fetch(["nomic-embed-text"], dim=768), "nomic-embed-text", 3)
+
+
+def test_provenance_modes_warn_and_off(caplog) -> None:  # type: ignore[no-untyped-def]
+    import logging
+
+    # warn: logs, does not raise
+    with caplog.at_level(logging.WARNING):
+        check_embed_provenance(_fetch(["other"]), "nomic-embed-text", 3, mode="warn")
+    assert any("mismatch" in r.message for r in caplog.records)
+    # off: silent, does not raise
+    check_embed_provenance(_fetch(["other"]), "nomic-embed-text", 3, mode="off")
+
+
+def test_provenance_skips_and_logs_when_fetch_raises() -> None:
+    def boom() -> tuple[list[str], int | None]:
+        raise RuntimeError("db down")
+
+    check_embed_provenance(boom, "nomic-embed-text", 3)  # swallowed + logged, not fatal

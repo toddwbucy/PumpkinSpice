@@ -253,10 +253,12 @@ small) differ. Do not introduce any other difference.
   backend overrides via `PUMPKINSPICE_EMBED_URL` / `PUMPKINSPICE_EMBED_MODEL` (as a unit). It MUST
   match the model that seeded the corpus -- if you change the embedder, re-run BOTH
   `seed_corpus.py` (pgvector) AND `seed_corpus_arango.py` (arango), since query and document
-  vectors must share one space per arm (a 768-dim mismatch degrades silently, no error -- so the
-  seeders stamp the embed model into each node's metadata and retrieval FAILS FAST on mismatch). For
-  scored latency runs set `OLLAMA_KEEP_ALIVE=-1` so an idle model reload is not billed into
-  retrieval latency.
+  vectors must share one space per arm (a 768-dim mismatch degrades silently, no error). To catch
+  that, the seeders stamp the embed model into each node's metadata and retrieval verifies it on the
+  first query (name + vector dimension + mixed-corpus/partial-reseed), failing fast on a mismatch.
+  For a known-same-space rename (an embedder whose name differs across servers), set
+  `embed_model_check = "warn"` (or `"off"`) in the retrieval config. For scored latency runs set
+  `OLLAMA_KEEP_ALIVE=-1` so an idle model reload is not billed into retrieval latency.
 - **Model selection and the run matrix** are the experiment document's to fix, not this repo's.
 
 ## Out of scope (spec section 8)
