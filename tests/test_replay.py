@@ -18,7 +18,9 @@ transformers = pytest.importorskip("transformers")
 
 from pumpkinspice.introspect.replay import (  # noqa: E402  (after importorskip)
     ReplayModel,
+    _find_base_model,
     _find_decoder_layers,
+    normalize_dtype,
 )
 
 
@@ -107,6 +109,27 @@ def test_input_validation() -> None:
     with pytest.raises(ValueError, match="n_prompt_tokens must be in"):
         rm.replay_token_ids(_ids(9), n_prompt_tokens=99)  # > seq_len
     rm.close()
+
+
+def test_normalize_dtype_strips_torch_prefix() -> None:
+    assert normalize_dtype("torch.bfloat16") == "bfloat16"
+    assert normalize_dtype(torch.float32) == "float32"
+    assert normalize_dtype("bfloat16") == "bfloat16"  # idempotent
+
+
+def test_find_base_model_prefers_real_decoder_and_falls_back() -> None:
+    # Standard layout: get_decoder() returns the LlamaModel (no lm_head), not the LM.
+    model = _tiny_llama()
+    assert _find_base_model(model) is model.model
+
+    # Nonconforming model whose get_decoder() returns itself and has no layers parent:
+    # must fall back to the model itself (with a warning), not crash.
+    class _SelfDecoder:
+        def get_decoder(self) -> object:
+            return self
+
+    obj = _SelfDecoder()
+    assert _find_base_model(obj) is obj
 
 
 def test_find_decoder_layers_llama_and_unknown() -> None:

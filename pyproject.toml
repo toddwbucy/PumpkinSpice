@@ -34,7 +34,9 @@ introspect = ["numpy>=1.26"]
 # hidden-state trajectory. torch is heavy; kept out of core. `gguf` lets the driver
 # dequantize the same GGUF the harness served. Large models may also want
 # `accelerate` (add it alongside for device_map).
-replay = ["pumpkinspice[introspect]", "torch>=2.2", "transformers>=4.44", "gguf>=0.10"]
+# transformers>=4.56: the load path passes `dtype=` (torch_dtype is deprecated there and
+# eventually no-ops, which would silently ignore --dtype).
+replay = ["pumpkinspice[introspect]", "torch>=2.2", "transformers>=4.56", "gguf>=0.10"]
 # Floor-test evaluator (issues #7, #8): the linear-probe AUCs over labeled metrics.
 # numpy + scikit-learn only; no torch, so the analysis runs without the replay stack.
 evaluate = ["pumpkinspice[introspect]", "scikit-learn>=1.3"]

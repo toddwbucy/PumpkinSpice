@@ -264,11 +264,22 @@ def _cmd_replay_metrics(args: argparse.Namespace) -> int:  # pragma: no cover - 
         rows = [json.loads(ln) for ln in Path(args.captures).read_text().splitlines() if ln.strip()]
         label_fn = bh.make_label_fn(rows, bh.RAMP[args.herobench_tier])
 
+    # Resolve dtype: bf16 fits long traces on a 48GB card, but a GGUF replay wants fp32
+    # -- the GGUF loader dequantizes to fp32, so bf16 would double-round the weights and
+    # break the "same numerical object" the --gguf path exists for. Explicit --dtype wins.
+    dtype = args.dtype or ("float32" if args.gguf else "bfloat16")
+    if args.gguf and args.dtype and args.dtype != "float32":
+        log.warning(
+            "--gguf with --dtype %s double-rounds the dequantized weights; float32 is exact",
+            args.dtype,
+        )
+    if args.device == "cpu" and dtype != "float32":
+        log.warning("%s on CPU: some ops are unimplemented/slow for half precision", dtype)
     model = ReplayModel.from_pretrained(
         args.model,
         gguf_file=args.gguf,
         device=args.device,
-        dtype=args.dtype,
+        dtype=dtype,
         trajectory_span=args.span,
     )
     try:
@@ -503,12 +514,13 @@ def build_parser() -> argparse.ArgumentParser:
         # The load dtype DOES affect the geometry (the residual stream is computed at
         # it; the float64 cast is post-hoc) -- but empirically bf16 vs fp32 shifts d_rho
         # ~0.3%. fp32 SDPA also falls back to the seq^2 math kernel, so long traces
-        # (10k+ tokens) need bf16 to fit a 48GB card. bf16 is the practical default;
-        # the dtype is recorded in each metrics row so corpora can't mix precisions.
+        # (10k+ tokens) need bf16 to fit a 48GB card. Default (unset) resolves to bf16,
+        # or fp32 for --gguf (whose loader dequantizes to fp32 -- bf16 would double-round).
+        # The dtype is recorded in each metrics row so corpora can't mix precisions.
         "--dtype",
-        default="bfloat16",
+        default=None,
         choices=["float32", "bfloat16", "float16"],
-        help="model load dtype; bfloat16 fits long traces on a 48GB card, fp32 is highest fidelity",
+        help="model load dtype; default bfloat16 (fits long traces on 48GB), or fp32 for --gguf",
     )
     replayp.add_argument(
         "--span", default="output", choices=["output", "full"], help="trajectory span"

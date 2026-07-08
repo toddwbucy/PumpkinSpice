@@ -191,11 +191,20 @@ def test_incommensurable_corpus_raises_actionably() -> None:
     with pytest.raises(ValueError, match="n_layers"):
         evaluate_floor_test([LabeledTurn("t", True, False, _metrics(mean_speed=1.0)), c])
 
-    # mixed replay dtype -> bf16 and fp32 perturb the geometry; refuse to pool them
+    # mixed KNOWN replay dtype -> bf16 and fp32 perturb the geometry; refuse to pool them
     fp = LabeledTurn("t", True, False, _metrics(mean_speed=1.0, dtype="float32"))
     bf = LabeledTurn("t", False, True, _metrics(mean_speed=2.0, dtype="bfloat16"))
     with pytest.raises(ValueError, match="replay dtype"):
         evaluate_floor_test([fp, bf])
+
+
+def test_unknown_dtype_is_unverified_not_blocking() -> None:
+    # 'unknown' (pre-provenance) must not be matched by equality: it should neither block
+    # extending a float32 corpus nor silently pool -- it warns and is exempt from the check.
+    turns = _corpus("tool_use", 20)
+    for i, t in enumerate(turns):
+        object.__setattr__(t.metrics, "dtype", "float32" if i % 2 else "unknown")
+    evaluate_floor_test(turns)  # float32 + unknown: must NOT raise (unknown is unverified)
 
 
 def test_rho_summary_reports_both_ranges() -> None:

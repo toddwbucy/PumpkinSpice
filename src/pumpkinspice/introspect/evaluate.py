@@ -36,6 +36,7 @@ probe. Never touches the decoder, a model, or the runtime loop.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -44,7 +45,13 @@ import numpy as np
 from numpy.typing import NDArray
 
 from pumpkinspice.introspect.geometry import Array, EarlyKinematics, roc_auc
-from pumpkinspice.introspect.replay import TrajectoryMetrics
+from pumpkinspice.introspect.replay import (
+    UNKNOWN_DTYPE,
+    TrajectoryMetrics,
+    normalize_dtype,
+)
+
+log = logging.getLogger(__name__)
 
 KINEMATIC_FEATURE_NAMES = (
     "mean_position_norm",
@@ -235,7 +242,6 @@ def _validate_corpus(turns: list[LabeledTurn]) -> None:
     """
     thresholds = set(turns[0].metrics.d_rho)
     n_layers = turns[0].metrics.n_layers
-    dtype = turns[0].metrics.dtype
     for i, t in enumerate(turns):
         if set(t.metrics.d_rho) != thresholds:
             raise ValueError(
@@ -247,11 +253,21 @@ def _validate_corpus(turns: list[LabeledTurn]) -> None:
                 f"turn {i}: n_layers {t.metrics.n_layers} != {n_layers} "
                 "(cannot pool rho curves across models of different depth)"
             )
-        if t.metrics.dtype != dtype:
-            raise ValueError(
-                f"turn {i}: replay dtype {t.metrics.dtype!r} != {dtype!r} "
-                "(bf16 and fp32 perturb the geometry; do not pool across precisions)"
-            )
+    # dtype: KNOWN precisions must be uniform (bf16 and fp32 perturb the geometry).
+    # "unknown" (pre-provenance) is unverified -- it can't be matched by equality (that
+    # both fails-open on two different-precision legacy files AND blocks extending an
+    # fp32 corpus with new float32 turns), so it warns instead.
+    known = {t.metrics.dtype for t in turns if t.metrics.dtype != UNKNOWN_DTYPE}
+    if len(known) > 1:
+        raise ValueError(
+            f"corpus mixes replay dtypes {sorted(known)} -- bf16 and fp32 perturb the "
+            "geometry; do not pool across precisions"
+        )
+    if any(t.metrics.dtype == UNKNOWN_DTYPE for t in turns):
+        log.warning(
+            "corpus has turns with no dtype provenance ('unknown'); cannot verify they "
+            "share a precision with the rest"
+        )
 
 
 def evaluate_floor_test(
@@ -411,7 +427,9 @@ def metrics_from_dict(d: dict[str, Any]) -> TrajectoryMetrics:
         n_prompt_tokens=int(d["n_prompt_tokens"]),
         n_output_tokens=int(d["n_output_tokens"]),
         n_layers=int(d["n_layers"]),
-        dtype=str(d.get("dtype", "unknown")),
+        # normalize at read too, so a producer that recorded "torch.bfloat16" verbatim
+        # is not seen as a mismatch against a "bfloat16" row from the same replay.
+        dtype=normalize_dtype(d.get("dtype", UNKNOWN_DTYPE)),
     )
 
 

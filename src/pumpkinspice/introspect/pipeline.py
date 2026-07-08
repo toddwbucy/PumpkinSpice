@@ -13,6 +13,7 @@ does not (ReplayModel imports torch lazily).
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -20,10 +21,18 @@ from typing import Any
 from pumpkinspice.introspect.evaluate import LabeledTurn, labeled_turn_to_dict
 from pumpkinspice.introspect.replay import ReplayModel
 
+log = logging.getLogger(__name__)
+
 # (task_type, correct, hard) extracted from one capture row.
 LabelFn = Callable[[dict[str, Any]], tuple[str, bool, bool]]
 # The full generated text to teacher-force from one capture row.
 OutputFn = Callable[[dict[str, Any]], str]
+
+# Max allowed drift between the re-derived prompt length and the server-reported
+# prompt_tokens before a turn is skipped: a real chat-template mismatch shifts the
+# count by far more than a BOS/edge-token quirk, and a wrong prompt length misaligns
+# the whole span (lo = n_prompt_tokens) with no error otherwise.
+PROMPT_TOKEN_DRIFT_TOLERANCE = 4
 
 
 def build_output(turn: dict[str, Any]) -> str:
@@ -70,8 +79,10 @@ def replay_captures(
     output_fn: OutputFn = build_output,
 ) -> tuple[int, int]:
     """Replay every capture and write labeled-metrics rows. Returns (written,
-    skipped). A turn is skipped (not fatal) when its forced continuation is too
-    short for a trajectory (< 2 tokens) -- e.g. an empty-output turn."""
+    skipped). A turn is skipped (not fatal) when its forced continuation is too short
+    for a trajectory (< 2 tokens), or when the re-derived prompt length drifts from the
+    server-reported ``prompt_tokens`` (a chat-template mismatch that would misalign the
+    span)."""
     # Read (and parse) the input fully BEFORE truncating the output, so a missing or
     # corrupt captures path does not destroy a previous good metrics file.
     turns = _read_jsonl(captures_path)
@@ -83,6 +94,23 @@ def replay_captures(
             try:
                 metrics = model.replay(str(turn.get("prompt", "")), output)
             except ValueError:
+                skipped += 1
+                continue
+            # Parity check: the re-derived template must match what the serving stack
+            # applied, or the span slice (lo = n_prompt_tokens) is wrong for every metric.
+            # Ground truth is the server's prompt_tokens (0 = not reported, e.g. offline).
+            server_pt = int(turn.get("prompt_tokens") or 0)
+            if (
+                server_pt
+                and abs(metrics.n_prompt_tokens - server_pt) > PROMPT_TOKEN_DRIFT_TOLERANCE
+            ):
+                log.warning(
+                    "prompt-token drift on %r: re-derived %d vs server %d -- chat-template "
+                    "mismatch, skipping (span would be misaligned)",
+                    turn.get("task"),
+                    metrics.n_prompt_tokens,
+                    server_pt,
+                )
                 skipped += 1
                 continue
             task_type, correct, hard = label_fn(turn)

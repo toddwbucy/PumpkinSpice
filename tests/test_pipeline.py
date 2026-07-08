@@ -101,6 +101,23 @@ def test_replay_captures_writes_labeled_metrics(tmp_path) -> None:  # type: igno
     assert set(turns[0].metrics.d_rho) == {0.5, 0.75, 0.9}
 
 
+def test_replay_captures_skips_prompt_token_drift(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # "hello world" re-derives to 11 prompt tokens via _FakeTok (1 token/char).
+    caps = tmp_path / "caps.jsonl"
+    rows = [
+        _capture_row(prompt_tokens=11),  # matches re-derived -> replayed
+        _capture_row(prompt_tokens=100),  # chat-template drift -> skipped
+        _capture_row(prompt_tokens=0),  # not reported (offline sentinel) -> no check
+    ]
+    caps.write_text("\n".join(json.dumps(r) for r in rows))
+
+    model = ReplayModel(_tiny_model(), tokenizer=_FakeTok())
+    out = tmp_path / "labeled.jsonl"
+    written, skipped = replay_captures(model, caps, out)
+    model.close()
+    assert (written, skipped) == (2, 1)  # only the drifted row is dropped
+
+
 def test_replay_captures_preserves_output_on_bad_input(tmp_path) -> None:  # type: ignore[no-untyped-def]
     # A missing captures path must not clobber a previous good metrics file: the
     # input is read (and here, fails) before the output is truncated.
