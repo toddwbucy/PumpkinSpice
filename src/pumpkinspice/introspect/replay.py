@@ -333,6 +333,13 @@ class ReplayModel:
         input_ids = torch.tensor([list(prompt_ids) + list(output_ids)], device=self.model.device)
         return input_ids, len(prompt_ids)
 
+    def encode(self, prompt: str, output: str) -> tuple[Any, int]:
+        """Public teacher-forced encode: ``(input_ids, n_prompt_tokens)`` WITHOUT the
+        forward pass. Lets a caller check prompt-token parity cheaply and skip a drifted
+        turn before paying the (expensive, hook-capturing) forward -- then hand the same
+        ids to ``replay_token_ids`` so encoding is not repeated."""
+        return self._encode(prompt, output)
+
     def replay(self, prompt: str, output: str) -> TrajectoryMetrics:
         """Replay one recorded turn. ``output`` is the full generated text to force
         (for a reasoning model, the caller assembles reasoning + answer)."""

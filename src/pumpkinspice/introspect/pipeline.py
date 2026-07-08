@@ -91,26 +91,30 @@ def replay_captures(
     with Path(out_path).open("w", encoding="utf-8") as w:
         for turn in turns:
             output = output_fn(turn)
-            try:
-                metrics = model.replay(str(turn.get("prompt", "")), output)
-            except ValueError:
-                skipped += 1
-                continue
+            # Encode first (cheap tokenization) so the parity check can skip a drifted turn
+            # BEFORE the expensive hook-capturing forward pass -- the very case it guards.
+            input_ids, n_prompt_tokens = model.encode(str(turn.get("prompt", "")), output)
             # Parity check: the re-derived template must match what the serving stack
             # applied, or the span slice (lo = n_prompt_tokens) is wrong for every metric.
-            # Ground truth is the server's prompt_tokens (0 = not reported, e.g. offline).
-            server_pt = int(turn.get("prompt_tokens") or 0)
-            if (
-                server_pt
-                and abs(metrics.n_prompt_tokens - server_pt) > PROMPT_TOKEN_DRIFT_TOLERANCE
-            ):
+            # Ground truth is the server's prompt_tokens (0 = not reported, e.g. offline);
+            # a malformed/legacy value coerces to 0 (skip the check), never aborts the run.
+            try:
+                server_pt = int(turn.get("prompt_tokens") or 0)
+            except (TypeError, ValueError):
+                server_pt = 0
+            if server_pt and abs(n_prompt_tokens - server_pt) > PROMPT_TOKEN_DRIFT_TOLERANCE:
                 log.warning(
                     "prompt-token drift on %r: re-derived %d vs server %d -- chat-template "
                     "mismatch, skipping (span would be misaligned)",
                     turn.get("task"),
-                    metrics.n_prompt_tokens,
+                    n_prompt_tokens,
                     server_pt,
                 )
+                skipped += 1
+                continue
+            try:
+                metrics = model.replay_token_ids(input_ids, n_prompt_tokens)
+            except ValueError:  # forced continuation too short for a trajectory (< 2 tokens)
                 skipped += 1
                 continue
             task_type, correct, hard = label_fn(turn)

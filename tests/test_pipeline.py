@@ -18,6 +18,7 @@ transformers = pytest.importorskip("transformers")
 from pumpkinspice.contracts import Turn  # noqa: E402
 from pumpkinspice.introspect.evaluate import load_labeled_turns  # noqa: E402
 from pumpkinspice.introspect.pipeline import (  # noqa: E402
+    PROMPT_TOKEN_DRIFT_TOLERANCE,
     build_output,
     labels_from_outcome,
     replay_captures,
@@ -108,6 +109,9 @@ def test_replay_captures_skips_prompt_token_drift(tmp_path) -> None:  # type: ig
         _capture_row(prompt_tokens=11),  # matches re-derived -> replayed
         _capture_row(prompt_tokens=100),  # chat-template drift -> skipped
         _capture_row(prompt_tokens=0),  # not reported (offline sentinel) -> no check
+        # diff EXACTLY at the tolerance is within bounds (the check is strictly `>`).
+        _capture_row(prompt_tokens=11 + PROMPT_TOKEN_DRIFT_TOLERANCE),  # replayed
+        _capture_row(prompt_tokens="not-a-number"),  # malformed -> coerces to 0, replayed
     ]
     caps.write_text("\n".join(json.dumps(r) for r in rows))
 
@@ -115,7 +119,7 @@ def test_replay_captures_skips_prompt_token_drift(tmp_path) -> None:  # type: ig
     out = tmp_path / "labeled.jsonl"
     written, skipped = replay_captures(model, caps, out)
     model.close()
-    assert (written, skipped) == (2, 1)  # only the drifted row is dropped
+    assert (written, skipped) == (4, 1)  # only the genuinely drifted row is dropped
 
 
 def test_replay_captures_preserves_output_on_bad_input(tmp_path) -> None:  # type: ignore[no-untyped-def]

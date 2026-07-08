@@ -131,6 +131,13 @@ def test_find_base_model_prefers_real_decoder_and_falls_back() -> None:
     obj = _SelfDecoder()
     assert _find_base_model(obj) is obj
 
+    # Middle branch: no get_decoder(), but a legacy layers-parent attribute
+    # (GPT-2 "transformer.h" here) -- resolve to that, not the full object.
+    import types
+
+    legacy = types.SimpleNamespace(transformer=types.SimpleNamespace(h=[object(), object()]))
+    assert _find_base_model(legacy) is legacy.transformer
+
 
 def test_find_decoder_layers_llama_and_unknown() -> None:
     model = _tiny_llama()
