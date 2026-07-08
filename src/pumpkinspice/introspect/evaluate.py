@@ -163,6 +163,10 @@ def _single_feature_auc(scores: list[float], labels: list[bool]) -> float | None
     return roc_auc(np.asarray(scores, dtype=np.float64), np.asarray(labels))
 
 
+def _fmt_auc(a: float | None) -> str:
+    return "n/a" if a is None else f"{a:.3f}"
+
+
 # --- report -----------------------------------------------------------------
 
 
@@ -190,6 +194,33 @@ class RhoCurveSummary:
 
 
 @dataclass(frozen=True)
+class LengthControl:
+    """Does the geometry beat generation LENGTH? (the #7 length confound.)
+
+    A reasoning model chooses its own generation length (its thinking budget), and that
+    length alone often predicts correctness/difficulty (harder/failing problems get more
+    tokens). ``d_rho`` and the kinematics are length-sensitive, so a geometry AUC can be
+    largely a length artifact. This compares three probes on the SAME labels:
+      * ``geometry_auc``  -- the geometry features alone (== the kill's AUC),
+      * ``length_auc``    -- ``n_output_tokens`` alone,
+      * ``combined_auc``  -- geometry + length together.
+    If ``combined_auc`` is not meaningfully above ``length_auc``, the geometry adds little
+    beyond length: the 'signal' is mostly thinking budget. ``marginal`` reports that gap."""
+
+    label: str  # what is predicted: "correctness" or "difficulty"
+    geometry_auc: float | None
+    length_auc: float | None
+    combined_auc: float | None
+
+    @property
+    def marginal(self) -> float | None:
+        """combined - length: the geometry's added value beyond generation length."""
+        if self.combined_auc is None or self.length_auc is None:
+            return None
+        return self.combined_auc - self.length_auc
+
+
+@dataclass(frozen=True)
 class FloorTestReport:
     n_by_type: dict[str, int]
     n_layers: int | None
@@ -198,6 +229,8 @@ class FloorTestReport:
     drho_per_threshold: dict[str, dict[float, float | None]]
     kinematics_correctness: dict[str, float | None]  # task_type -> CV probe AUC
     cross_transfer: dict[str, float | None]  # "A->B" -> AUC
+    # length-confound control: geometry vs generation length, per probe (issues #7)
+    length_control: dict[str, LengthControl]
     # verdict buckets
     kills_hash7: list[KillCheck]
     rho_curves: RhoCurveSummary | None  # #8 bucket
@@ -213,6 +246,16 @@ class FloorTestReport:
             auc = "n/a" if kc.auc is None else f"{kc.auc:.3f}"
             lines.append(
                 f"  [{verdict}] {kc.name}: AUC={auc} (>= {kc.threshold}) {kc.note}".rstrip()
+            )
+        lines.append("")
+        lines.append("Length control (does geometry beat generation length?):")
+        if not self.length_control:
+            lines.append("  (no probes)")
+        for name, lc in self.length_control.items():
+            marg = "n/a" if lc.marginal is None else f"{lc.marginal:+.3f}"
+            lines.append(
+                f"  {name}: geom={_fmt_auc(lc.geometry_auc)} length={_fmt_auc(lc.length_auc)} "
+                f"combined={_fmt_auc(lc.combined_auc)} (geom beyond length: {marg})"
             )
         lines.append("")
         lines.append("#8 rho curves (separate bucket):")
@@ -289,17 +332,36 @@ def evaluate_floor_test(
     drho_probe: dict[str, float | None] = {}
     drho_pt: dict[str, dict[float, float | None]] = {}
     kin_probe: dict[str, float | None] = {}
+    length_control: dict[str, LengthControl] = {}
     for ty, group in grouped.items():
         hard = [t.hard for t in group]
         correct = [t.correct for t in group]
+        yh = np.asarray(hard, dtype=int)
+        yc = np.asarray(correct, dtype=int)
+        # generation length as a 1-column feature, to isolate the length confound
+        length_x = np.array([[float(t.metrics.n_output_tokens)] for t in group])
         drho_x = np.array([drho_features(t.metrics) for t in group])
-        drho_probe[ty] = _cv_probe_auc(drho_x, np.asarray(hard, dtype=int), seed=seed)
+        drho_probe[ty] = _cv_probe_auc(drho_x, yh, seed=seed)
         drho_pt[ty] = {
             rho: _single_feature_auc([float(t.metrics.d_rho[rho]) for t in group], hard)
             for rho in thresholds
         }
         kin_x = np.array([kinematic_features(t.metrics) for t in group])
-        kin_probe[ty] = _cv_probe_auc(kin_x, np.asarray(correct, dtype=int), seed=seed)
+        kin_probe[ty] = _cv_probe_auc(kin_x, yc, seed=seed)
+        # Does the geometry beat length? Reuse the geometry AUCs; add length-only and
+        # geometry+length probes on the same labels.
+        length_control[f"correctness[{ty}]"] = LengthControl(
+            "correctness",
+            kin_probe[ty],
+            _cv_probe_auc(length_x, yc, seed=seed),
+            _cv_probe_auc(np.hstack([kin_x, length_x]), yc, seed=seed),
+        )
+        length_control[f"difficulty[{ty}]"] = LengthControl(
+            "difficulty",
+            drho_probe[ty],
+            _cv_probe_auc(length_x, yh, seed=seed),
+            _cv_probe_auc(np.hstack([drho_x, length_x]), yh, seed=seed),
+        )
 
     cross: dict[str, float | None] = {}
     types = list(grouped)
@@ -324,6 +386,7 @@ def evaluate_floor_test(
         drho_per_threshold=drho_pt,
         kinematics_correctness=kin_probe,
         cross_transfer=cross,
+        length_control=length_control,
         kills_hash7=kills,
         rho_curves=rho_curves,
     )
@@ -471,6 +534,16 @@ def report_to_dict(r: FloorTestReport) -> dict[str, Any]:
         },
         "kinematics_correctness": r.kinematics_correctness,
         "cross_transfer": r.cross_transfer,
+        "length_control": {
+            name: {
+                "label": lc.label,
+                "geometry_auc": lc.geometry_auc,
+                "length_auc": lc.length_auc,
+                "combined_auc": lc.combined_auc,
+                "marginal": lc.marginal,
+            }
+            for name, lc in r.length_control.items()
+        },
         "kills_hash7": [
             {
                 "name": k.name,

@@ -171,6 +171,36 @@ def test_load_labeled_turns_and_cli(tmp_path) -> None:  # type: ignore[no-untype
     report = json.loads(out.read_text())
     assert report["n_by_type"] == {"tool_use": 20, "reasoning": 20}
     assert any(k["name"].startswith("kill1") for k in report["kills_hash7"])
+    # length-confound control is serialized per probe
+    assert "correctness[reasoning]" in report["length_control"]
+    assert set(report["length_control"]["correctness[reasoning]"]) == {
+        "label",
+        "geometry_auc",
+        "length_auc",
+        "combined_auc",
+        "marginal",
+    }
+
+
+def test_length_control_isolates_the_length_confound() -> None:
+    # Correctness tracks generation LENGTH (n_output_tokens); the geometry (mean_speed)
+    # is pure noise. The length-control probe must expose that: length AUC high, geometry
+    # AUC no better than length.
+    rng = np.random.default_rng(0)
+    turns = []
+    for i in range(60):
+        correct = i % 2 == 0
+        m = _metrics(mean_speed=float(rng.normal(3.0, 1.0)))  # geometry = noise
+        object.__setattr__(m, "n_output_tokens", int(rng.normal(120 if correct else 30, 4)))
+        turns.append(LabeledTurn("reasoning", correct, False, m))
+    rep = evaluate_floor_test(turns)
+    lc = rep.length_control["correctness[reasoning]"]
+    assert lc.label == "correctness"
+    assert lc.length_auc is not None and lc.length_auc > 0.85  # length separates cleanly
+    assert lc.geometry_auc is not None
+    assert lc.length_auc > lc.geometry_auc  # length beats geometry -> the confound
+    assert lc.marginal is not None  # combined - length is computable
+    assert "difficulty[reasoning]" in rep.length_control
 
 
 def test_empty_turns_raises() -> None:
