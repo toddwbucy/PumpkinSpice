@@ -25,6 +25,24 @@ from typing import Any
 DEFAULT_EMBED_URL = "http://localhost:11434"
 DEFAULT_EMBED_MODEL = "nomic-embed-text"
 
+# Node-metadata key the seeders stamp with the embed model that produced the vectors,
+# so a retrieval arm can fail fast on a query/document embedder mismatch.
+EMBED_MODEL_META_KEY = "embed_model"
+
+
+def assert_embed_model_matches(corpus_model: str | None, configured_model: str | None) -> None:
+    """Fail fast if the corpus was seeded with a different embed model than retrieval is
+    configured to use. A 768-dim mismatch raises no error in the cosine search -- it
+    silently returns worse neighbours, misattributed to the model under test. A corpus
+    with no stamp (pre-provenance) or an unreadable one passes ``corpus_model=None`` and
+    skips the check."""
+    if corpus_model and corpus_model != configured_model:
+        raise ValueError(
+            f"embed-model mismatch: corpus was seeded with {corpus_model!r} but retrieval "
+            f"is configured with {configured_model!r} -- query and document vectors must "
+            "share one embedder. Re-seed (seed_corpus*.py) or fix the config."
+        )
+
 
 def embed_query(client: Any, model: str | None, query: str) -> list[float]:
     """Embed one query via an OpenAI-compatible ``/v1/embeddings`` endpoint.

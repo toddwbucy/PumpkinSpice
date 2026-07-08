@@ -27,7 +27,13 @@ from typing import Any
 import httpx
 
 from ..contracts import BeliefNode, RetrievalResult
-from ..embeddings import DEFAULT_EMBED_MODEL, DEFAULT_EMBED_URL, embed_query, warm_up
+from ..embeddings import (
+    DEFAULT_EMBED_MODEL,
+    DEFAULT_EMBED_URL,
+    assert_embed_model_matches,
+    embed_query,
+    warm_up,
+)
 
 # Exact cosine top-k. Distances computed against the stored embedding array.
 _AQL = """
@@ -77,6 +83,21 @@ class ArangoRetrieval:
         self._db = ArangoClient(hosts=self.url).db(
             self.database, username=self._user, password=self._password
         )
+        # Fail fast on a query/document embedder mismatch (silent 768-dim degradation).
+        assert_embed_model_matches(self._read_embed_stamp(), self.embed_model)
+
+    def _read_embed_stamp(self) -> str | None:
+        """The embed model stamped into the corpus (any doc's metadata), or None if
+        unstamped / unreadable -- best-effort provenance, not a connectivity check."""
+        try:
+            cursor: Any = self._db.aql.execute(
+                "FOR doc IN @@collection LIMIT 1 RETURN doc.metadata.embed_model",
+                bind_vars={"@collection": self.collection},
+            )
+            val = next(iter(cursor), None)
+            return val if isinstance(val, str) else None
+        except Exception:
+            return None
 
     def _embed(self, query: str) -> list[float]:
         return embed_query(self._embed_client, self.embed_model, query)

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from pumpkinspice.embeddings import (
     DEFAULT_EMBED_MODEL,
     DEFAULT_EMBED_URL,
+    assert_embed_model_matches,
     embed_query,
     warm_up,
 )
@@ -54,3 +56,10 @@ def test_warm_up_swallows_a_down_endpoint() -> None:
         raise httpx.ConnectError("down")
 
     warm_up(_client(handler), "nomic-embed-text")  # must not raise
+
+
+def test_assert_embed_model_matches() -> None:
+    assert_embed_model_matches("nomic-embed-text", "nomic-embed-text")  # match: ok
+    assert_embed_model_matches(None, "nomic-embed-text")  # unstamped corpus: skip
+    with pytest.raises(ValueError, match="embed-model mismatch"):
+        assert_embed_model_matches("text-embedding-nomic-embed-text-v1.5", "nomic-embed-text")

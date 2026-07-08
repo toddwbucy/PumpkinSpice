@@ -26,7 +26,7 @@ from arango import ArangoClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from pumpkinspice.corpus import CorpusNode, load_corpus
-from pumpkinspice.embeddings import DEFAULT_EMBED_MODEL, DEFAULT_EMBED_URL
+from pumpkinspice.embeddings import DEFAULT_EMBED_MODEL, DEFAULT_EMBED_URL, EMBED_MODEL_META_KEY
 
 DEFAULT_DATA_DIR = Path.home() / "git/HeroBench/Virtual_Environment/Data"
 
@@ -79,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
                     "_key": node.id.replace(":", "_"),
                     "id": node.id,
                     "text": node.text,
-                    "metadata": node.metadata,
+                    "metadata": {**node.metadata, EMBED_MODEL_META_KEY: args.embed_model},
                     "embedding": vec,
                 }
             )
