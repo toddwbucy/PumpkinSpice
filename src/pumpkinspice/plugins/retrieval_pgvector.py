@@ -31,7 +31,14 @@ from typing import Any
 import httpx
 
 from ..contracts import BeliefNode, RetrievalResult
-from ..embeddings import DEFAULT_EMBED_MODEL, DEFAULT_EMBED_URL, embed_query, warm_up
+from ..embeddings import (
+    DEFAULT_EMBED_MODEL,
+    DEFAULT_EMBED_URL,
+    EMBED_MODEL_META_KEY,
+    assert_embed_model_matches,
+    embed_query,
+    warm_up,
+)
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -104,6 +111,24 @@ class PgVectorRetrieval:
         self._psycopg = psycopg
         self._register_vector = register_vector
         self._sql = psycopg_sql
+        # Fail fast if the corpus was seeded with a different embedder (a 768-dim
+        # mismatch degrades retrieval silently otherwise).
+        assert_embed_model_matches(self._read_embed_stamp(), self.embed_model)
+
+    def _read_embed_stamp(self) -> str | None:
+        """The embed model stamped into the corpus (any node's metadata), or None if
+        unstamped / unreadable -- best-effort provenance, not a connectivity check."""
+        try:
+            stmt = self._sql.SQL("SELECT {m} ->> %s FROM {t} LIMIT 1").format(
+                m=self._sql.Identifier(self.metadata_column),
+                t=self._sql.Identifier(*self._table_parts),
+            )
+            with self._psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+                cur.execute(stmt, (EMBED_MODEL_META_KEY,))
+                row = cur.fetchone()
+            return row[0] if row and isinstance(row[0], str) else None
+        except Exception:
+            return None
 
     def _embed(self, query: str) -> list[float]:
         return embed_query(self._embed_client, self.embed_model, query)
