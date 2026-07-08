@@ -1,7 +1,14 @@
 # Floor-test v2 design (issues #7 / #8)
 
-Status: DRAFT for operator review. Motivated by preliminary v1 results (Qwen3-8B) that
-surfaced two confounds in the v1 apparatus. This doc specs the redesign. ASCII only.
+Status: v2 spec, revised after the PR #21 review (mechanics re-grounded in the repo's own
+artifacts; internal contradictions resolved). ASCII only.
+
+Scope: PumpkinSpice is the conventional-RAG *control* (Benchero 2.0 Agent 2) and, per the
+operator directive, a general model-baselining / introspection testbed. This floor test is
+the *general-baselining / introspection* use: it is ICL-free and conventional-RAG (the model
+decides when to retrieve). It is NOT a Benchero scored run; the fairness contract for those is
+separate. In-context demonstration (ICL) is explicitly out of scope here and deferred to
+WeaverTools (see decision 5).
 
 ## 1. What the floor test is
 
@@ -34,157 +41,200 @@ Length control (geometry vs generation length; length = deterministic single-fea
 marginal = combined - length is a noisy point estimate, NO confidence interval):
 - correctness[reasoning]: geom 0.685, length 0.667, combined 0.715 (geom beyond length +0.047)
 - difficulty[reasoning]:  geom 0.720, length 0.784, combined 0.757 (geom beyond length -0.027)
-- kill3 length baseline (does length transfer across task types better than geometry?):
-  reasoning->planning geometry 0.154 vs length 0.823; planning->reasoning geometry 0.448 vs
-  length 0.667 -- LENGTH transfers, geometry does not (it inverts). The cross-task signal,
-  such as it is, is length.
+- kill3 length baseline: reasoning->planning geometry 0.154 vs length 0.823;
+  planning->reasoning geometry 0.448 vs length 0.667 -- LENGTH transfers, geometry does not.
+
+14B replication (reasoning arm): kill2 0.600, length 0.617 (geometry does not beat length);
+difficulty length 0.754 > geometry 0.683; #8 range 1.17 (still structured). The #7 signal
+does not strengthen with scale; #8 holds.
 
 ## 3. The two confounds v1 exposed
 
 ### Confound A -- per-run labeling (task identity)
 `make_label_fn` stamps ONE `eventual_correct` and ONE `hard` on all ~100 turns of a tier.
 With only ~5 tiers, any probe that "predicts correctness/difficulty" actually learns "which
-task this is" -- different tasks trace different paths, so the kinematics separate them
-trivially. The planning kill2 (0.978) is yellow_slime-vs-rest discrimination, not correctness.
-The effective independent-unit count for the agentic arm is ~5, not ~500.
+task this is." The planning kill2 (0.978) is yellow_slime-vs-rest discrimination. The
+effective independent-unit count for the agentic arm is ~5, not ~500.
 
 ### Confound B -- generation length (thinking budget)
 In thinking mode the model chooses its own generation length, spending more tokens on
-hard/failing problems (planning: easy mean 1662 tokens, hard mean 2902). `d_rho` and the
-kinematics are length-sensitive, so a geometry AUC can be a length artifact. The length
-control shows this is real and per-cell: for reasoning DIFFICULTY, length (0.784) beats the
-geometry probe (0.720) and adding geometry to length does not help (marginal -0.027 -- but
-this is a noisy point estimate, not a verdict); reasoning CORRECTNESS keeps a small residual
-(+0.047). The kill3 length baseline is the sharpest: length transfers across task types
-(0.823) while the geometry transfer inverts (0.154), so the cross-task "signal" is length.
+hard/failing problems. `d_rho` and the kinematics are length-sensitive, so a geometry AUC
+can be a length artifact -- confirmed per-cell by the length control (section 2).
 
 ## 4. v2 design
 
 ### 4.1 Externalize the reasoning loop (the key change)
-Turn OFF the model's internal thinking; drive reasoning as bounded harness steps
-(ReAct: think -> act -> observe, one short generation each). This:
-- controls generation length (uniform, bounded steps) -> geometry cannot hide behind
-  thinking budget;
-- keeps task capability (the loop still reasons, just visibly);
-- makes the reasoning state observable to the harness;
-- collapses compute (short generations -> cheap decode AND trivial replay; the O(T^3)
-  eig that dominated v1 only hurt because T was ~10k of thinking).
+Turn OFF the model's internal thinking (Qwen3 `enable_thinking=false`); drive reasoning as
+bounded harness steps (ReAct: observe -> plan/act -> observe). This: controls generation
+length (uniform, bounded steps) so geometry cannot hide behind thinking budget; keeps task
+capability (the loop still reasons, visibly); and collapses compute for this arm.
 
-Add "reasoning location" as an independent variable: internal-CoT vs harness-externalized,
-same tasks/models, to measure where (if anywhere) the signal lives.
+"Reasoning location" is an independent variable: internal-CoT vs harness-externalized, same
+tasks/models. **The on/off contrast is on each arm's geometry-BEYOND-LENGTH marginal (the
+length-control's combined-minus-length), NOT raw geometry** -- the two arms differ ~10-20x in
+trajectory length by construction (decision 6), so a raw geometry difference is confounded
+with length. Both arms therefore always run through the length control (4.4).
 
-### 4.2 Per-episode metric (operator decision)
-One trajectory-metric per EPISODE, from the representative (first/planning) step's
-trajectory -- a single generation, matching the reasoning arm's one-generation-one-
-trajectory structure, and ~50x cheaper to replay than aggregating all turns. Decode still
-requires the full episode (outcome is episode-terminal); only replay is on the one step.
+### 4.2 Per-episode metric
+One trajectory-metric per EPISODE, from the FIRST planning turn's trajectory -- a single
+generation, matching the reasoning arm's one-generation-one-trajectory structure, ~cheap to
+replay. Decode runs the full episode (the outcome is episode-terminal); replay is on the one
+first turn. The first turn is measured at span="output" so prompt length cannot leak into the
+trajectory. The label is the episode's eventual outcome (4.3).
 
 ### 4.3 Deconfound the labels (Confound A)
-- Correctness/transfer: MANY stochastic episodes per task (temperature > 0, varied seeds),
-  each labeled by its OWN outcome, so correctness varies WITHIN a held-constant task.
-- Difficulty: MULTIPLE distinct tasks per hard/easy bin (~10-15), so d_rho must find a
-  difficulty signature that generalizes across tasks, not memorize one.
-- Grouped cross-validation: group by episode (correctness) / task (difficulty) so no unit
+- Correctness/transfer: MANY stochastic episodes per task (temperature > 0, distinct recorded
+  seeds), each labeled by its OWN outcome, so correctness varies WITHIN a held-constant task.
+- Difficulty: MULTIPLE distinct tasks per hard/easy bin so d_rho must find a difficulty
+  signature that generalizes across tasks, not memorize one. Target >= 5 distinct tasks per
+  bin for leave-one-task-out task-grouped CV. NOTE: v1's aspirational "10-15 per bin" is
+  revised down to what the HeroBench monster/craft roster supports (enumerated in build
+  step 3); if the roster caps it below ~5, that is a documented limitation on kill1's
+  cross-task generalization power, not a silent downgrade.
+- Grouped cross-validation: group by episode (correctness) / by task (difficulty) so no unit
   leaks across folds; report the effective independent-unit count, not the turn count.
 
 ### 4.4 Deconfound length (Confound B)
-Uniform harness steps hold length ~constant. The evaluator's length-control (implemented)
-reports, per probe, geometry vs length-alone vs combined, so every future run states
-whether the geometry beats length. A cell where `combined ~ length` is a length artifact.
-Hardening (from the PR #20 review): the length feature is SPAN-AWARE (output tokens for
-span="output", prompt+output for span="full", recorded in TrajectoryMetrics) so a full-span
-corpus cannot escape the control; the length AUC is a DETERMINISTIC single-feature AUC (a CV
-logistic on one column deflates it and inflates the geometry's margin); the cross-transfer
-kill3 gets its own length baseline (it is the probe most exposed to a transferring length
-proxy); and `marginal` is documented as a noisy point estimate with no CI (do not read a
-keep/kill sign off it alone -- a bootstrap CI is v2 work).
+The evaluator's length control (shipped, PR #20) reports per probe geometry vs length-alone
+vs combined, span-aware, with a deterministic single-feature length AUC and a kill3 length
+baseline; `marginal` is a noisy point estimate (no CI). Every v2 run reads through it, and
+the reasoning-location contrast (4.1) is defined on the marginal, not raw geometry.
 
 ### 4.5 Frontier calibration
 Within-task outcome variation only exists near ~50% success, and the frontier is
-model-specific. Use a FIXED pool of ~20-30 graded tasks run on every model, and select the
-near-50/50 subset per model for the correctness cells: comparable pool + per-model balance.
-Needs a cheap calibration pass (a few episodes/task/model to estimate success rate).
+model-specific. Use the FIXED task pool (all bins x ways, ~20 tasks) on every model and
+select the near-50/50 subset per model for the correctness/transfer cells: comparable pool +
+per-model balance. Cheap calibration pass (a few episodes/task/model to estimate success rate).
 
 ## 5. Statistical power / compute
 
 AUC reliability tracks the minority-outcome count. For a defensible 0.70 keep/kill call,
-target ~300-400 balanced episodes per arm per model (95% CI ~ +/-0.065). Because v2
-generations are short, this is cheap: reasoning ~400 problems x 1 generation; agentic ~400
-episodes x ~40 short steps, batched through vLLM -> a few hours per model per arm, and
-replay is minutes (short traces). The GPU-reduction optimization is therefore NOT needed
-for v2 (it only helped the long internal-CoT traces we are removing).
+target ~300-400 balanced episodes per arm per model (95% CI ~ +/-0.065).
+
+- **Externalized arm (the keep/kill arm):** short generations -> cheap decode and near-free
+  replay (short traces, so the O(T^3) eig is trivial). ~360 episodes/model is a few hours.
+- **Internal-CoT arm (baseline, KEPT per decision 3):** long-thinking generations (T ~ 8-16k)
+  -- exactly the regime whose O(T^3) eig dominated v1 replay. This arm still pays the slow
+  replay; it is mitigated by the split-across-GPUs + on-GPU eigendecomposition (both proven
+  this cycle) but is NOT "minutes". Its decode + slow replay is a real, separate budget line.
+  It is a POWER-LIMITED, DIRECTIONAL comparison: ~120 episodes (95% CI ~ +/-0.11), read for
+  the SIGN of the on/off effect on the geometry-beyond-length marginal, paired against a
+  MATCHED externalized 120-episode subset (same tasks) -- not a standalone keep/kill.
+  (Correction of the earlier draft, which wrongly said replay is "minutes" and the
+  GPU-reduction is "not needed"; it is needed for this arm.)
 
 ## 6. Carries over vs new
 
-Carries over: the harness, replay driver, geometry, evaluator core, #8, dtype/embed
-provenance, the reasoning (MATH) arm structure, the length-control diagnostic.
+Carries over: the harness, replay driver, geometry, evaluator core (incl. the shipped length
+control), #8, dtype/embed provenance, the reasoning (MATH) arm.
 
-New work: (a) an externalized ReAct harness step (thinking off); (b) a multi-task,
-frontier-calibrated HeroBench set; (c) a stochastic per-episode decode runner; (d) grouped
-CV + per-episode aggregation in the evaluator; (e) reasoning-arm difficulty control.
+New work: (a) an externalized ReAct prompt strategy + a Qwen3 no-think decode flag;
+(b) the multi-task HeroBench ladder as data (8.1); (c) a stochastic per-episode decode runner
+that records seed+sampler per episode; (d) a won-fight episode-outcome detector (8.2);
+(e) grouped CV + per-episode aggregation in the evaluator; (f) any missing world-client verb
+(e.g. `rest`) and any missing corpus mechanic node the ladder depends on (8.3).
 
-## 7. Success criteria (what validates vs kills the metric under v2)
+## 7. Success criteria
 
-- If, at controlled length and with per-episode labels, `geometry beyond length > 0` and
-  kill2/kill3 clear 0.70 across models -> the geometry carries a real, general signal.
+- If, at controlled length and with per-episode labels, the geometry-beyond-length marginal
+  is reliably > 0 AND kill2/kill3 clear 0.70 across models -> the geometry carries a real,
+  general signal.
 - If `combined ~ length` everywhere -> the v1 signal was thinking budget; the metric is a
-  length proxy and should be dropped (or redefined length-invariant).
-- #8 (depth structure) is evaluated separately and has held up clean so far.
+  length proxy, to be dropped or redefined length-invariant.
+- Reasoning-location (on/off) is read on the marginal: does thinking-on add signal beyond
+  length that externalized does not?
+- #8 (depth structure) is evaluated separately and has held clean across 8B/14B.
 
 ## 8. Resolved decisions (operator-approved)
 
-1. **Episodes/arm:** ~360 (40 x 9 tasks) on the externalized arm; internal-CoT baseline ~120
-   (matched subset -- the on/off contrast needs matched N, not full scale).
-2. **Task ladder:** 4 bins x ~3 ways (concrete set in 8.1). Goals are **capability milestones**
-   (defeat monster M), not XP levels -- leveling happens along the way but the scored goal is
-   capability, which carries the planning content.
-3. **Keep the internal-CoT arm** as a baseline: reasoning on/off is a clean factorial IV
-   (same task/model, first-plan trajectory measured with thinking on vs externalized).
-4. **Representative step = the FIRST planning turn** (matches the reasoning arm's
-   one-generation-one-trajectory structure; the initial plan stands for the episode).
-5. **ICL is DEFERRED to WeaverTools.** The v2 baseline is ICL-free: the harness sets state,
-   the model plans cold from the observed state, no worked example in context. An in-context
-   demonstration would confound the geometry (imitation + demo-relevance) and can trivialize
-   correctness; it is Agent-1 / WeaverTools territory, not the conventional-RAG control.
-6. **Context: bounded, NOT max.** The measured first-plan turn has a small, uniform context
-   (state + retrieval + instruction). Generation cap differs by arm -- externalized ~512-1024
-   (bounded plan/action), internal ~8-16k (room to think); that difference IS the on/off
-   contrast. vLLM `--max-model-len ~32768`. Episode-*play* uses bounded history so the agent
-   can adapt to its own observed failures (in-context working memory, not ICL); the
-   *measurement* context stays small. On failure mid-episode the agent retries WITH the
-   failure in context (ReAct/replan); no context reload.
+1. **Episodes/arm:** ~360 externalized (the keep/kill arm), distributed across the ladder
+   tasks with the frontier subset weighted for outcome balance; internal-CoT baseline ~120,
+   paired against a matched externalized 120-subset (directional, see section 5).
+2. **Task ladder:** capability-milestone goals (8.1). The scored goal is "won a fight vs
+   monster M" (8.2), NOT an XP level and NOT the monster's drop.
+3. **Keep the internal-CoT arm** as the reasoning on/off baseline (directional; section 5).
+4. **Representative step = the FIRST planning turn** (span="output").
+5. **ICL DEFERRED to WeaverTools.** v2 baseline is ICL-free: harness sets state, model plans
+   cold; no worked example in context (would confound geometry + trivialize correctness).
+6. **Context: bounded, NOT max.** The measured first-plan turn's context is `state +
+   instruction + available tools` -- retrieval is MODEL-INITIATED (a conventional-RAG MCP
+   tool call, per the hard constraint "the model decides when to retrieve"), so retrieval
+   results are NOT injected into the first-turn context; they appear only in later turns.
+   Generation cap differs by arm (externalized ~512-1024, internal ~8-16k) -- that difference
+   IS the on/off contrast, which is why the contrast is read on the length-controlled marginal
+   (4.1). **Both arms use the SAME sampling temperature** (so reasoning-location is not
+   confounded with sampling entropy); seed+sampler are recorded per episode. vLLM
+   `--max-model-len ~32768`. Episode-*play* uses bounded history (in-context working memory,
+   not ICL); on a failed action the agent retries WITH the failure in context (ReAct/replan),
+   no reload; the *measurement* (first turn) is pre-failure and small.
 
-### 8.1 The concrete task ladder (difficulty = element-match x level-for-damage)
+### 8.1 The concrete task ladder (difficulty = level-gap x counter-element)
 
-Verified mechanics: damage = weapon attack value (`wooden_stick` earth 4, `copper_dagger` air 8,
-`iron_dagger` air 24 but level 10), reduced by resistance; fights have a round cap, so
-insufficient damage-per-round means you survive but never close the kill ("turtle"). Better
-weapons are level-gated (character level to equip + crafting-skill level to craft). So higher
-bins require BOTH the counter-element AND leveling (character HP + crafting skill), not gear at L1.
+Mechanics, grounded in the corpus (the agent's only knowledge source) and the Data files:
+- A fight is WON or LOST based on the character's LEVEL and equipped WEAPON vs the monster's
+  level and attacks; an under-leveled character loses repeatedly to a monster several levels
+  above it; a lost fight yields 0 XP / 0 drops and is still an HTTP success
+  (`corpus.py` `mechanic:combat_risk`). So "the action succeeded" != "the fight was won".
+- Weapons carry an element + attack value and a crafting-skill level to make
+  (`items.json`, `corpus.py` render_item): `wooden_stick` earth 4; `copper_dagger` air 8
+  (weaponcrafting 1, 48 copper_ore -> 6 copper -> craft); higher weapons need higher
+  crafting-skill levels. (No character-level *equip* gate is asserted -- unverified.)
+- Monster resistances build the ladder (`monsters.json`): chicken L1 no-resist; yellow_slime
+  L2 earth-resist 25; green_slime L4 air-resist 25; blue/red slime L6/7; cow L8.
 
-| bin | goal (capability milestone) | resist / gate | ways (multi-task per bin) |
+Difficulty is therefore a joint gate of level-gap and counter-element: a small gap + the
+right element is winnable low; a large gap loses regardless of gear, so leveling is required.
+
+| bin | goal: win a fight vs | gate | ways (>= ~5 distinct tasks/bin, roster-limited; enumerated in build 3) |
 | --- | --- | --- | --- |
-| 0 anchor (scripted) | kill chicken (L1) + cook | none; stick earth 4 works | harness-executed; positive control |
-| 1 | beat yellow_slime (L2, 70hp) | earth-resist -> craft copper_dagger (air 8), doable at L1 | craft-air / grind-out-level / gear+cook |
-| 2 | beat green_slime (L4, 80hp) | air-resist -> dagger now resisted, L1 gear too weak -> MUST level | level+craft counter-element / out-level / armor+consumable |
-| 3 | beat blue/red slime (L6/7) or cow (L8) | multi-element + high HP | full chain / grind+gear / mixed |
+| 0 (positive control) | chicken (L1) | none; starting stick works | measured, ~100% success; NOT scripted |
+| 1 | yellow_slime (L2, gap 1) | earth-resist -> want air (`copper_dagger`); winnable near L1 | craft-air-weapon / level-then-fight / alt L2 monsters |
+| 2 | green_slime (L4, gap 3) | air-resist (dagger now resisted) + larger gap -> MUST level + re-gear | level+craft counter-element / level-then-fight / alt L4 targets |
+| 3 | blue/red slime (L6/7) or cow (L8) | large gap + high HP | deeper level + gear + consumables; alt high-tier targets |
 
-Bin 1 is element-only (pure planning at L1); bins 2-3 fuse element-match with leveling. The
-"out-level" way is the deliberate low-planning path in each bin -- the guard so difficulty
-cannot be read off activity type (see 4.3 rationale). Frontier calibration (4.5) finds each
-model's ~50% bin empirically -- that is exactly where the level x gear gate bites for that model.
+Bin 0 is the positive control (any competent model wins). Bin 1 is element-only planning near
+L1. Bins 2-3 fuse element-match with leveling (combat_risk: large gap loses regardless). The
+"level-then-fight" way is the deliberate lower-planning path in each bin -- the guard so
+difficulty cannot be read off activity type (4.3). Difficulty is a property of the TARGET
+monster's bin, not the way; the way varies the approach, the episode outcome is won-vs-M.
+No scripted preamble: the character spawns at a clean, uniform L1 baseline (stick equipped,
+full HP, sap + ash_wood), and the measured first-plan turn is from that spawn.
 
-**Preamble (bin 0, harness-executed, NOT in model context):** move to a chicken, fight it, cook
-the `raw_chicken`, heal -> every measured episode starts fed/armed at a known L1 baseline.
+### 8.2 Outcome scoring (won-fight-vs-M)
+
+The per-turn capture records `outcome.data` = the full HeroBench action response
+(`loop.py`; `world_herobench` sets `ActionResult.data = resp.json()`). A fight response
+records its result (win/loss) and XP, independent of the ~5%-rate drop -- so an episode's
+outcome = "did any fight vs monster M return a win". A new episode-outcome detector scans the
+episode's turns for a won fight vs the goal monster (build step in section 9; the exact result
+field is confirmed against a live fight response at build time). This is why the goal is
+"won vs M" and NOT the drop (drop rate ~20 = ~5%/kill, per `bench_herobench`) and NOT an XP
+level (v1 used `goal_level` only because it lacked a reliable kill signal; the win is in
+`outcome.data`).
+
+### 8.3 Corpus / action-surface prerequisites (fairness)
+The RAG agent knows only what it can retrieve, so any mechanic the ladder depends on MUST be
+a corpus node (else the ladder measures corpus coverage, not planning). `combat_risk`,
+resistances, recipes, and `leveling_via_crafting` are present. Healing is via the `rest`
+action (HP regen) and/or equipping a cooked consumable that auto-heals in a fight -- there is
+NO "eat"/"consume" verb; build step 3 confirms `world_herobench` can issue `rest`/`equip` and
+adds any missing verb. If the ladder relies on a mechanic not yet in the corpus, seeding it is
+part of that build step.
 
 ## 9. Build sequence (PR plan)
 
-1. This spec (finalized decisions + ladder).
-2. Externalized ReAct prompt strategy (thinking off, bounded think->act step) + a Qwen3
-   no-think decode flag.
-3. v2 task ladder as data + the harness-executed preamble (state setup, not in context).
-4. Walking-skeleton smoke test: one task, a few stochastic episodes, end to end.
-5. Stochastic per-episode runner (temperature 0.7, N episodes/task) + per-episode first-plan
-   metric + episode-outcome labels.
-6. Grouped CV in the evaluator (group by episode for correctness, by task for difficulty).
-7. Frontier calibration pass + full runs (8B then 14B) + the internal-CoT baseline subset.
+1. This spec.
+2. Externalized ReAct prompt strategy (bounded observe->plan->act) + a Qwen3 no-think decode
+   flag (`chat_template_kwargs={enable_thinking:false}` via `extra_body`); same-temp for both
+   arms.
+3. HeroBench ladder as data (enumerate >= ~5 tasks/bin from the roster) + the won-fight
+   outcome detector + any missing world-client verb (`rest`) + any missing corpus mechanic
+   node; capture gains seed+sampler fields.
+4. Walking-skeleton smoke test: one task, a few stochastic episodes, end to end (verify the
+   won-fight detector against live fight responses).
+5. Stochastic per-episode runner (same temperature both arms, recorded seed/sampler,
+   N episodes/task) + per-episode first-plan-turn metric (span="output") + episode-outcome
+   labels; grouped-CV wiring in the evaluator.
+6. Frontier calibration pass (per-model ~50/50 subset selection).
+7. Full runs: externalized 8B then 14B (keep/kill); internal-CoT matched 120-subset per model
+   (directional on/off), on the slow replay (split + on-GPU eig).
