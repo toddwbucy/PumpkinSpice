@@ -23,8 +23,8 @@ model      = "mistral-small-24b-instruct-2501"
 top_k       = 5
 dsn_env     = "PUMPKINSPICE_PG_DSN"                        # scoped, read-only
 table       = "kg.belief_nodes"
-embed_url   = "http://localhost:1234"
-embed_model = "text-embedding-nomic-embed-text-v1.5"
+embed_url   = "http://localhost:11434"
+embed_model = "nomic-embed-text"
 
 [world]
 base_url  = "http://127.0.0.1:8000"

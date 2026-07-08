@@ -62,8 +62,8 @@ class ArangoRetrieval:
                 "arango retrieval must not run as root; use the scoped read-only user."
             )
 
-        self.embed_url = str(config.get("embed_url", "http://192.168.0.203:1234")).rstrip("/")
-        self.embed_model = config.get("embed_model")
+        self.embed_url = str(config.get("embed_url", "http://localhost:11434")).rstrip("/")
+        self.embed_model = config.get("embed_model", "nomic-embed-text")
         self._embed_client = httpx.Client(base_url=self.embed_url, timeout=60.0)
 
         try:

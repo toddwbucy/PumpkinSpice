@@ -39,8 +39,8 @@ BACKENDS = {
     "ollama": "http://localhost:11434",
     "vllm": "http://localhost:8000",
 }
-EMBED_URL = LMSTUDIO_URL
-EMBED_MODEL = "text-embedding-nomic-embed-text-v1.5"
+EMBED_URL = os.environ.get("PUMPKINSPICE_EMBED_URL", "http://localhost:11434")
+EMBED_MODEL = "nomic-embed-text"
 HEROBENCH_URL = "http://127.0.0.1:8000"
 _MAX_TOOL_ROUNDS = 8  # cap the agentic Chat tool loop (Phase 3a)
 

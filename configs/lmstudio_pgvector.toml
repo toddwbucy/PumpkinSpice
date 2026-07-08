@@ -29,7 +29,7 @@ dsn_env      = "PUMPKINSPICE_PG_DSN"   # scoped, read-only
 table        = "belief_nodes"
 text_column  = "text"
 vector_column = "embedding"
-embed_url    = "http://localhost:1234"
+embed_url    = "http://localhost:11434"
 # embed_model = "nomic-embed-text"
 
 [world]

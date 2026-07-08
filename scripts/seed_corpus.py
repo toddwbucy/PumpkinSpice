@@ -52,8 +52,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     ap.add_argument("--dsn-env", default="PUMPKINSPICE_PG_LOADER_DSN")
-    ap.add_argument("--embed-url", default="http://192.168.0.203:1234")
-    ap.add_argument("--embed-model", default="text-embedding-nomic-embed-text-v1.5")
+    ap.add_argument("--embed-url", default="http://localhost:11434")
+    ap.add_argument("--embed-model", default="nomic-embed-text")
     ap.add_argument("--batch-size", type=int, default=32)
     args = ap.parse_args(argv)
 

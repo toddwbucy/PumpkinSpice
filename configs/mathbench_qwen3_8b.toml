@@ -1,0 +1,25 @@
+# MATH reasoning arm of the #7/#8 floor test, decoded by Qwen3-8B via vLLM.
+#   ~/.venv_default/bin/vllm serve Qwen/Qwen3-8B --port 8001 --max-model-len 20480
+#   pumpkinspice mathbench -c mathbench_qwen3_8b --data-dir ~/olympus/Data/benchmarks/math_json \
+#       --levels 3,4,5 -o captures/math_qwen3_8b.jsonl
+# Greedy decode (vllm decoder GREEDY defaults) for one deterministic trajectory per
+# problem. The SAME model id is used for the replay step so the trajectory comes from
+# the model that generated the trace.
+# NOTE: Qwen3-8B is a THINKING model. max_tokens must be large enough for the <think>
+# block to CLOSE and emit \boxed{}, or a correct answer gets truncated -> scored wrong
+# (a truncation false-negative that would poison the correctness label). 3072 was far
+# too small (thinking alone filled it); 16384 lets it finish.
+
+[run]
+decoder   = "vllm"
+retrieval = "null"
+world     = "mock"
+prompt    = "default"
+capture   = "jsonl"
+
+[decoder]
+base_url = "http://127.0.0.1:8001"
+model    = "Qwen/Qwen3-8B"
+# Qwen3 is a reasoning model: give the chain-of-thought + answer room. Kept bounded
+# so a hard problem cannot run away; raise if solutions truncate mid-thought.
+max_tokens = 16384

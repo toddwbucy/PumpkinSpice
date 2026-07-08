@@ -246,6 +246,10 @@ small) differ. Do not introduce any other difference.
   localhost. Note this for spec section 5's transport benchmark, which assumes a localhost path.
 - **Retrieval backends:** ArangoDB at `localhost:8529` (plain HTTP, needs auth) and Postgres/
   pgvector at `localhost:5432`. Both confirmed reachable.
+- **Embeddings:** headless **Ollama** at `http://localhost:11434` serving `nomic-embed-text`
+  (768-dim), the default for retrieval and `seed_corpus*.py`. Decoupled from the decoder so no
+  LMStudio GUI is needed. It MUST match the model that seeded the corpus -- if you change the
+  embedder, re-run `seed_corpus.py` (query and document vectors must share one space).
 - **Model selection and the run matrix** are the experiment document's to fix, not this repo's.
 
 ## Out of scope (spec section 8)

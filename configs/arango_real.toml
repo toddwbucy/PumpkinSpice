@@ -27,8 +27,8 @@ database     = "herobench_kg"
 collection   = "belief_nodes"
 user_env     = "ARANGO_AGENT_USER"          # scoped, read-only
 password_env = "ARANGO_AGENT_PASSWORD"
-embed_url    = "http://localhost:1234"
-embed_model  = "text-embedding-nomic-embed-text-v1.5"
+embed_url    = "http://localhost:11434"
+embed_model  = "nomic-embed-text"
 
 [world]
 base_url  = "http://127.0.0.1:8000"
