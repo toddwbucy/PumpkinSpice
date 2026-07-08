@@ -27,7 +27,15 @@ from typing import Any
 import httpx
 
 from ..contracts import BeliefNode, RetrievalResult
-from ..embeddings import DEFAULT_EMBED_MODEL, DEFAULT_EMBED_URL, embed_query, warm_up
+from ..embeddings import (
+    CHECK_MODES,
+    DEFAULT_EMBED_MODEL,
+    DEFAULT_EMBED_URL,
+    EMBED_MODEL_META_KEY,
+    check_embed_provenance,
+    embed_query,
+    warm_up,
+)
 
 # Exact cosine top-k. Distances computed against the stored embedding array.
 _AQL = """
@@ -65,6 +73,12 @@ class ArangoRetrieval:
 
         self.embed_url = str(config.get("embed_url", DEFAULT_EMBED_URL)).rstrip("/")
         self.embed_model = config.get("embed_model", DEFAULT_EMBED_MODEL)
+        self._check_mode = str(config.get("embed_model_check", "strict"))
+        if self._check_mode not in CHECK_MODES:
+            raise ValueError(
+                f"embed_model_check must be one of {CHECK_MODES}; got {self._check_mode!r}"
+            )
+        self._provenance_checked = False
         self._embed_client = httpx.Client(base_url=self.embed_url, timeout=60.0)
         warm_up(self._embed_client, self.embed_model)  # avoid cold-start in latency
 
@@ -77,6 +91,25 @@ class ArangoRetrieval:
         self._db = ArangoClient(hosts=self.url).db(
             self.database, username=self._user, password=self._password
         )
+        # The embed-provenance check runs lazily on the first retrieve(), not here.
+
+    def _fetch_provenance(self) -> tuple[list[str], int | None]:
+        """(distinct embed-model stamps across the corpus, one stored vector's dim).
+        DISTINCT (not LIMIT 1) so a partial re-seed's mixed stamps are caught; the key is
+        BOUND via @key so it tracks EMBED_MODEL_META_KEY instead of a hardcoded path. The
+        dimension guards the arango arm specifically -- its AQL cosine has none, so a
+        cross-dim query would truncate the dot product and degrade silently."""
+        stamp_cursor: Any = self._db.aql.execute(
+            "FOR doc IN @@collection RETURN DISTINCT doc.metadata[@key]",
+            bind_vars={"@collection": self.collection, "key": EMBED_MODEL_META_KEY},
+        )
+        stamps = [s for s in stamp_cursor if isinstance(s, str)]
+        dim_cursor: Any = self._db.aql.execute(
+            "FOR doc IN @@collection LIMIT 1 RETURN LENGTH(doc.embedding)",
+            bind_vars={"@collection": self.collection},
+        )
+        dim = next(iter(dim_cursor), None)
+        return stamps, (int(dim) if isinstance(dim, int) else None)
 
     def _embed(self, query: str) -> list[float]:
         return embed_query(self._embed_client, self.embed_model, query)
@@ -84,6 +117,15 @@ class ArangoRetrieval:
     def retrieve(self, query: str, *, top_k: int) -> RetrievalResult:
         t0 = time.perf_counter()
         vec = self._embed(query)
+        if not self._provenance_checked:
+            check_embed_provenance(
+                self._fetch_provenance,
+                self.embed_model,
+                len(vec),
+                mode=self._check_mode,
+                backend="arango",
+            )
+            self._provenance_checked = True
         nq = math.sqrt(sum(x * x for x in vec)) or 1.0
         bind_vars: dict[str, Any] = {
             "@collection": self.collection,

@@ -29,7 +29,7 @@ from psycopg.types.json import Jsonb
 # Make the package importable when run as a plain script.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from pumpkinspice.corpus import CorpusNode, load_corpus
-from pumpkinspice.embeddings import DEFAULT_EMBED_MODEL, DEFAULT_EMBED_URL
+from pumpkinspice.embeddings import DEFAULT_EMBED_MODEL, DEFAULT_EMBED_URL, EMBED_MODEL_META_KEY
 
 DEFAULT_DATA_DIR = Path.home() / "git/HeroBench/Virtual_Environment/Data"
 UPSERT = """
@@ -58,6 +58,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--batch-size", type=int, default=32)
     args = ap.parse_args(argv)
 
+    if not args.embed_model:
+        # A falsy model gets stamped as "" and then reads back as "unstamped", silently
+        # disabling the provenance check on the corpus it produced.
+        print(
+            "error: --embed-model must be non-empty (it is stamped into the corpus).",
+            file=sys.stderr,
+        )
+        return 1
+
     dsn = os.environ.get(args.dsn_env)
     if not dsn:
         print(
@@ -83,7 +92,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
         for node, vec in zip(batch, vectors, strict=True):
-            rows.append((node.id, node.text, Jsonb(node.metadata), vec))
+            meta = {**node.metadata, EMBED_MODEL_META_KEY: args.embed_model}
+            rows.append((node.id, node.text, Jsonb(meta), vec))
         print(f"  embedded {min(start + args.batch_size, len(nodes))}/{len(nodes)}")
 
     with psycopg.connect(dsn, autocommit=True) as conn:

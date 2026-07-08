@@ -31,7 +31,19 @@ from typing import Any
 import httpx
 
 from ..contracts import BeliefNode, RetrievalResult
-from ..embeddings import DEFAULT_EMBED_MODEL, DEFAULT_EMBED_URL, embed_query, warm_up
+from ..embeddings import (
+    CHECK_MODES,
+    DEFAULT_EMBED_MODEL,
+    DEFAULT_EMBED_URL,
+    EMBED_MODEL_META_KEY,
+    check_embed_provenance,
+    embed_query,
+    warm_up,
+)
+
+# Bound every connect: libpq's default is 0 (wait for the OS TCP timeout, minutes), so a
+# blackholed host (VPN down, firewall DROP) would hang `pumpkinspice run` startup.
+_CONNECT_TIMEOUT_S = 5
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -89,6 +101,12 @@ class PgVectorRetrieval:
         self.recipe_top_n = int(config.get("recipe_top_n", 3))
         self.embed_url = str(config.get("embed_url", DEFAULT_EMBED_URL)).rstrip("/")
         self.embed_model = config.get("embed_model", DEFAULT_EMBED_MODEL)
+        self._check_mode = str(config.get("embed_model_check", "strict"))
+        if self._check_mode not in CHECK_MODES:
+            raise ValueError(
+                f"embed_model_check must be one of {CHECK_MODES}; got {self._check_mode!r}"
+            )
+        self._provenance_checked = False
         self._embed_client = httpx.Client(base_url=self.embed_url, timeout=60.0)
         warm_up(self._embed_client, self.embed_model)  # avoid cold-start in latency
 
@@ -104,6 +122,28 @@ class PgVectorRetrieval:
         self._psycopg = psycopg
         self._register_vector = register_vector
         self._sql = psycopg_sql
+        # NB: no DB IO in __init__ -- the embed-provenance check runs lazily on the first
+        # retrieve() (reusing that connection), so construction stays IO-free and tests
+        # need no live Postgres.
+
+    def _fetch_provenance(self, cur: Any) -> tuple[list[str], int | None]:
+        """(distinct embed-model stamps across the corpus, one stored vector's dim).
+        DISTINCT so a partial re-seed's mixed stamps are caught, not masked by LIMIT 1."""
+        table = self._sql.Identifier(*self._table_parts)
+        cur.execute(
+            self._sql.SQL("SELECT DISTINCT {m} ->> %s AS s FROM {t}").format(
+                m=self._sql.Identifier(self.metadata_column), t=table
+            ),
+            (EMBED_MODEL_META_KEY,),
+        )
+        stamps = [r[0] for r in cur.fetchall() if r[0] is not None]
+        cur.execute(
+            self._sql.SQL("SELECT vector_dims({v}) FROM {t} LIMIT 1").format(
+                v=self._sql.Identifier(self.vector_column), t=table
+            )
+        )
+        row = cur.fetchone()
+        return stamps, (int(row[0]) if row and row[0] is not None else None)
 
     def _embed(self, query: str) -> list[float]:
         return embed_query(self._embed_client, self.embed_model, query)
@@ -128,9 +168,19 @@ class PgVectorRetrieval:
             table=self._sql.Identifier(*self._table_parts),
         )
         nodes: list[BeliefNode] = []
-        with self._psycopg.connect(self._dsn) as conn:
+        with self._psycopg.connect(self._dsn, connect_timeout=_CONNECT_TIMEOUT_S) as conn:
             self._register_vector(conn)
             with conn.cursor() as cur:
+                if not self._provenance_checked:
+                    # Reuse this query's connection; runs once, before results are used.
+                    check_embed_provenance(
+                        lambda: self._fetch_provenance(cur),
+                        self.embed_model,
+                        len(vec),
+                        mode=self._check_mode,
+                        backend="pgvector",
+                    )
+                    self._provenance_checked = True
                 cur.execute(stmt, (vec_literal, vec_literal, top_k))
                 for row in cur.fetchall():
                     meta = row[2] if isinstance(row[2], dict) else {}
