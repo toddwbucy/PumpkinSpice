@@ -163,8 +163,27 @@ def _single_feature_auc(scores: list[float], labels: list[bool]) -> float | None
     return roc_auc(np.asarray(scores, dtype=np.float64), np.asarray(labels))
 
 
-def _fmt_auc(a: float | None) -> str:
-    return "n/a" if a is None else f"{a:.3f}"
+def _fmt_auc(a: float | None, spec: str = ".3f") -> str:
+    return "n/a" if a is None else format(a, spec)
+
+
+def _length_of(m: TrajectoryMetrics) -> float:
+    """The generation length the trajectory actually spans, so the length confound is
+    measured on the SAME tokens the geometry saw: output tokens for span='output'
+    (the default), prompt+output for span='full'."""
+    if m.trajectory_span == "full":
+        return float(m.n_prompt_tokens + m.n_output_tokens)
+    return float(m.n_output_tokens)
+
+
+def _length_auc(lengths: list[float], labels: list[bool]) -> float | None:
+    """Deterministic single-feature AUC of length, sign-folded to >= 0.5. Length is a
+    monotone predictor, so the raw feature AUC is the right estimate; a CV logistic on a
+    single column can rank-invert across folds and DEFLATE it (inflating the geometry's
+    apparent margin). Folding to max(a, 1-a) reports separability magnitude, comparable
+    to the geometry probe (which learns its own sign)."""
+    a = _single_feature_auc(lengths, labels)
+    return None if a is None else max(a, 1.0 - a)
 
 
 # --- report -----------------------------------------------------------------
@@ -200,21 +219,28 @@ class LengthControl:
     A reasoning model chooses its own generation length (its thinking budget), and that
     length alone often predicts correctness/difficulty (harder/failing problems get more
     tokens). ``d_rho`` and the kinematics are length-sensitive, so a geometry AUC can be
-    largely a length artifact. This compares three probes on the SAME labels:
-      * ``geometry_auc``  -- the geometry features alone (== the kill's AUC),
-      * ``length_auc``    -- ``n_output_tokens`` alone,
+    largely a length artifact. Three AUCs on the SAME labels (keyed in the report by task
+    type then kind, so ``geometry_auc`` is the corresponding probe's AUC -- but note a
+    difficulty entry exists for every task type while kill1 is registered only for the
+    agentic type, so a non-agentic difficulty entry maps to no kill):
+      * ``geometry_auc``  -- the geometry features (kinematics for correctness, d_rho for
+        difficulty),
+      * ``length_auc``    -- the span length alone, a deterministic single-feature AUC,
       * ``combined_auc``  -- geometry + length together.
-    If ``combined_auc`` is not meaningfully above ``length_auc``, the geometry adds little
-    beyond length: the 'signal' is mostly thinking budget. ``marginal`` reports that gap."""
+    If ``combined`` is not meaningfully above ``length``, the geometry adds little beyond
+    length. ``marginal`` (combined - length) is that gap -- a POINT ESTIMATE of a
+    difference of cross-validated AUCs with NO confidence interval: values within
+    estimator noise (the report's AUC CI is roughly +/-0.065 at n~400) are inconclusive,
+    so do NOT read a keep/kill sign off ``marginal`` alone."""
 
-    label: str  # what is predicted: "correctness" or "difficulty"
     geometry_auc: float | None
     length_auc: float | None
     combined_auc: float | None
 
     @property
     def marginal(self) -> float | None:
-        """combined - length: the geometry's added value beyond generation length."""
+        """combined - length: the geometry's added value beyond generation length.
+        A noisy point estimate (see the class docstring) -- not a verdict on its own."""
         if self.combined_auc is None or self.length_auc is None:
             return None
         return self.combined_auc - self.length_auc
@@ -228,9 +254,14 @@ class FloorTestReport:
     drho_hard_easy: dict[str, float | None]  # task_type -> probe AUC over d_rho features
     drho_per_threshold: dict[str, dict[float, float | None]]
     kinematics_correctness: dict[str, float | None]  # task_type -> CV probe AUC
-    cross_transfer: dict[str, float | None]  # "A->B" -> AUC
-    # length-confound control: geometry vs generation length, per probe (issues #7)
-    length_control: dict[str, LengthControl]
+    cross_transfer: dict[str, float | None]  # "A->B" -> AUC (geometry transfer)
+    # length-confound control (issues #7): task_type -> kind ("correctness"/"difficulty")
+    # -> geometry vs length. cross_transfer_length is the kill3 length baseline: the same
+    # transfer with length as the ONLY feature, so "A->B" geometry transfer can be read
+    # against "A->B" length transfer (task types differ in length, so kill3 is the probe
+    # most exposed to a transferring length proxy).
+    length_control: dict[str, dict[str, LengthControl]]
+    cross_transfer_length: dict[str, float | None]  # "A->B" -> length-only transfer AUC
     # verdict buckets
     kills_hash7: list[KillCheck]
     rho_curves: RhoCurveSummary | None  # #8 bucket
@@ -243,20 +274,26 @@ class FloorTestReport:
         lines.append("#7 kill conditions:")
         for kc in self.kills_hash7:
             verdict = "UNDEFINED" if kc.passed is None else ("PASS" if kc.passed else "KILL")
-            auc = "n/a" if kc.auc is None else f"{kc.auc:.3f}"
             lines.append(
-                f"  [{verdict}] {kc.name}: AUC={auc} (>= {kc.threshold}) {kc.note}".rstrip()
+                f"  [{verdict}] {kc.name}: AUC={_fmt_auc(kc.auc)} (>= {kc.threshold}) "
+                f"{kc.note}".rstrip()
             )
         lines.append("")
-        lines.append("Length control (does geometry beat generation length?):")
+        lines.append("Length control (geometry vs length; marginal is a noisy point estimate):")
         if not self.length_control:
             lines.append("  (no probes)")
-        for name, lc in self.length_control.items():
-            marg = "n/a" if lc.marginal is None else f"{lc.marginal:+.3f}"
-            lines.append(
-                f"  {name}: geom={_fmt_auc(lc.geometry_auc)} length={_fmt_auc(lc.length_auc)} "
-                f"combined={_fmt_auc(lc.combined_auc)} (geom beyond length: {marg})"
-            )
+        for ty, kinds in self.length_control.items():
+            for kind, lc in kinds.items():
+                lines.append(
+                    f"  {kind}[{ty}]: geom={_fmt_auc(lc.geometry_auc)} "
+                    f"length={_fmt_auc(lc.length_auc)} combined={_fmt_auc(lc.combined_auc)} "
+                    f"(geom beyond length: {_fmt_auc(lc.marginal, '+.3f')})"
+                )
+        if self.cross_transfer_length:
+            lines.append("  kill3 length baseline (geometry transfer should beat this):")
+            for d, a in self.cross_transfer_length.items():
+                geo = self.cross_transfer.get(d)
+                lines.append(f"    {d}: geometry={_fmt_auc(geo)} vs length={_fmt_auc(a)}")
         lines.append("")
         lines.append("#8 rho curves (separate bucket):")
         if self.rho_curves is None:
@@ -332,14 +369,15 @@ def evaluate_floor_test(
     drho_probe: dict[str, float | None] = {}
     drho_pt: dict[str, dict[float, float | None]] = {}
     kin_probe: dict[str, float | None] = {}
-    length_control: dict[str, LengthControl] = {}
+    length_control: dict[str, dict[str, LengthControl]] = {}
     for ty, group in grouped.items():
         hard = [t.hard for t in group]
         correct = [t.correct for t in group]
         yh = np.asarray(hard, dtype=int)
         yc = np.asarray(correct, dtype=int)
-        # generation length as a 1-column feature, to isolate the length confound
-        length_x = np.array([[float(t.metrics.n_output_tokens)] for t in group])
+        # generation length the trajectory spanned (span-aware), as a 1-column feature
+        lengths = [_length_of(t.metrics) for t in group]
+        length_x = np.array([[x] for x in lengths])
         drho_x = np.array([drho_features(t.metrics) for t in group])
         drho_probe[ty] = _cv_probe_auc(drho_x, yh, seed=seed)
         drho_pt[ty] = {
@@ -348,22 +386,23 @@ def evaluate_floor_test(
         }
         kin_x = np.array([kinematic_features(t.metrics) for t in group])
         kin_probe[ty] = _cv_probe_auc(kin_x, yc, seed=seed)
-        # Does the geometry beat length? Reuse the geometry AUCs; add length-only and
-        # geometry+length probes on the same labels.
-        length_control[f"correctness[{ty}]"] = LengthControl(
-            "correctness",
-            kin_probe[ty],
-            _cv_probe_auc(length_x, yc, seed=seed),
-            _cv_probe_auc(np.hstack([kin_x, length_x]), yc, seed=seed),
-        )
-        length_control[f"difficulty[{ty}]"] = LengthControl(
-            "difficulty",
-            drho_probe[ty],
-            _cv_probe_auc(length_x, yh, seed=seed),
-            _cv_probe_auc(np.hstack([drho_x, length_x]), yh, seed=seed),
-        )
+        # Does the geometry beat length? Same shape for both kinds (one place, so a
+        # future edit can't silently swap the labels/features of one copy). Length uses
+        # the deterministic single-feature AUC (a CV probe on one column deflates it).
+        length_control[ty] = {
+            kind: LengthControl(
+                geometry_auc=geom,
+                length_auc=_length_auc(lengths, labels),
+                combined_auc=_cv_probe_auc(np.hstack([feat_x, length_x]), yarr, seed=seed),
+            )
+            for kind, feat_x, labels, yarr, geom in (
+                ("correctness", kin_x, correct, yc, kin_probe[ty]),
+                ("difficulty", drho_x, hard, yh, drho_probe[ty]),
+            )
+        }
 
     cross: dict[str, float | None] = {}
+    cross_length: dict[str, float | None] = {}
     types = list(grouped)
     for a in types:
         for b in types:
@@ -374,6 +413,11 @@ def evaluate_floor_test(
             xb = np.array([kinematic_features(t.metrics) for t in grouped[b]])
             yb = np.asarray([t.correct for t in grouped[b]], dtype=int)
             cross[f"{a}->{b}"] = _transfer_auc(xa, ya, xb, yb)
+            # kill3 length baseline: does length alone transfer? (kill3 is the probe most
+            # exposed to a transferring length proxy, since task types differ in length.)
+            la = np.array([[_length_of(t.metrics)] for t in grouped[a]])
+            lb = np.array([[_length_of(t.metrics)] for t in grouped[b]])
+            cross_length[f"{a}->{b}"] = _transfer_auc(la, ya, lb, yb)
 
     kills = _build_kills(agentic_type, threshold, drho_probe, kin_probe, cross)
     rho_curves = _summarize_rho(turns, flat_range)
@@ -387,6 +431,7 @@ def evaluate_floor_test(
         kinematics_correctness=kin_probe,
         cross_transfer=cross,
         length_control=length_control,
+        cross_transfer_length=cross_length,
         kills_hash7=kills,
         rho_curves=rho_curves,
     )
@@ -467,6 +512,7 @@ def metrics_to_dict(m: TrajectoryMetrics) -> dict[str, Any]:
         "n_output_tokens": m.n_output_tokens,
         "n_layers": m.n_layers,
         "dtype": m.dtype,
+        "trajectory_span": m.trajectory_span,
     }
 
 
@@ -493,6 +539,7 @@ def metrics_from_dict(d: dict[str, Any]) -> TrajectoryMetrics:
         # normalize at read too, so a producer that recorded "torch.bfloat16" verbatim
         # is not seen as a mismatch against a "bfloat16" row from the same replay.
         dtype=normalize_dtype(d.get("dtype", UNKNOWN_DTYPE)),
+        trajectory_span=str(d.get("trajectory_span", "output")),
     )
 
 
@@ -535,15 +582,18 @@ def report_to_dict(r: FloorTestReport) -> dict[str, Any]:
         "kinematics_correctness": r.kinematics_correctness,
         "cross_transfer": r.cross_transfer,
         "length_control": {
-            name: {
-                "label": lc.label,
-                "geometry_auc": lc.geometry_auc,
-                "length_auc": lc.length_auc,
-                "combined_auc": lc.combined_auc,
-                "marginal": lc.marginal,
+            ty: {
+                kind: {
+                    "geometry_auc": lc.geometry_auc,
+                    "length_auc": lc.length_auc,
+                    "combined_auc": lc.combined_auc,
+                    "marginal": lc.marginal,
+                }
+                for kind, lc in kinds.items()
             }
-            for name, lc in r.length_control.items()
+            for ty, kinds in r.length_control.items()
         },
+        "cross_transfer_length": r.cross_transfer_length,
         "kills_hash7": [
             {
                 "name": k.name,

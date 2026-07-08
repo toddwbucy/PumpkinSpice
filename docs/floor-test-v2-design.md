@@ -30,9 +30,14 @@ Pre-registered kills (AUC < 0.70 -> dead):
 | kill3 planning->reasoning | 0.448 | KILL |
 | #8 rho curves | range 1.36 | structured (clean positive) |
 
-Length control (geometry vs generation length):
-- correctness[reasoning]: geom 0.685, length 0.647, combined 0.715 (geom beyond length +0.068)
-- difficulty[reasoning]:  geom 0.720, length 0.764, combined 0.757 (geom beyond length -0.008)
+Length control (geometry vs generation length; length = deterministic single-feature AUC;
+marginal = combined - length is a noisy point estimate, NO confidence interval):
+- correctness[reasoning]: geom 0.685, length 0.667, combined 0.715 (geom beyond length +0.047)
+- difficulty[reasoning]:  geom 0.720, length 0.784, combined 0.757 (geom beyond length -0.027)
+- kill3 length baseline (does length transfer across task types better than geometry?):
+  reasoning->planning geometry 0.154 vs length 0.823; planning->reasoning geometry 0.448 vs
+  length 0.667 -- LENGTH transfers, geometry does not (it inverts). The cross-task signal,
+  such as it is, is length.
 
 ## 3. The two confounds v1 exposed
 
@@ -47,8 +52,11 @@ The effective independent-unit count for the agentic arm is ~5, not ~500.
 In thinking mode the model chooses its own generation length, spending more tokens on
 hard/failing problems (planning: easy mean 1662 tokens, hard mean 2902). `d_rho` and the
 kinematics are length-sensitive, so a geometry AUC can be a length artifact. The length
-control shows this is real and per-cell: reasoning DIFFICULTY is explained entirely by
-length (geometry adds -0.008); reasoning CORRECTNESS has a small residual (+0.068).
+control shows this is real and per-cell: for reasoning DIFFICULTY, length (0.784) beats the
+geometry probe (0.720) and adding geometry to length does not help (marginal -0.027 -- but
+this is a noisy point estimate, not a verdict); reasoning CORRECTNESS keeps a small residual
+(+0.047). The kill3 length baseline is the sharpest: length transfers across task types
+(0.823) while the geometry transfer inverts (0.154), so the cross-task "signal" is length.
 
 ## 4. v2 design
 
@@ -83,6 +91,13 @@ requires the full episode (outcome is episode-terminal); only replay is on the o
 Uniform harness steps hold length ~constant. The evaluator's length-control (implemented)
 reports, per probe, geometry vs length-alone vs combined, so every future run states
 whether the geometry beats length. A cell where `combined ~ length` is a length artifact.
+Hardening (from the PR #20 review): the length feature is SPAN-AWARE (output tokens for
+span="output", prompt+output for span="full", recorded in TrajectoryMetrics) so a full-span
+corpus cannot escape the control; the length AUC is a DETERMINISTIC single-feature AUC (a CV
+logistic on one column deflates it and inflates the geometry's margin); the cross-transfer
+kill3 gets its own length baseline (it is the probe most exposed to a transferring length
+proxy); and `marginal` is documented as a noisy point estimate with no CI (do not read a
+keep/kill sign off it alone -- a bootstrap CI is v2 work).
 
 ### 4.5 Frontier calibration
 Within-task outcome variation only exists near ~50% success, and the frontier is

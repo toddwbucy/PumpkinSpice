@@ -114,6 +114,11 @@ class TrajectoryMetrics:
     # as provenance so a floor-test corpus cannot silently pool incommensurable
     # precisions; the evaluator rejects a mix. Default marks pre-provenance metrics.
     dtype: str = UNKNOWN_DTYPE
+    # Which token positions the trajectory spans ("output" = forced continuation only,
+    # "full" = prompt+output). The evaluator's length control needs this to pick the
+    # right length feature: n_output_tokens for "output", prompt+output for "full".
+    # Default matches the driver default (and pre-provenance metrics).
+    trajectory_span: str = "output"
 
 
 def _find_decoder_layers(model: Any) -> Any:
@@ -422,4 +427,5 @@ class ReplayModel:
             n_output_tokens=n_output_tokens,
             n_layers=self.n_layers,
             dtype=self.dtype,
+            trajectory_span=self.trajectory_span,
         )

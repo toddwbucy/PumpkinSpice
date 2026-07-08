@@ -35,6 +35,8 @@ def _metrics(
     n_layers: int = 4,
     rho_block: list[float] | None = None,
     dtype: str = "bfloat16",
+    n_output_tokens: int = 5,
+    trajectory_span: str = "output",
 ) -> TrajectoryMetrics:
     d = 4
     kin = EarlyKinematics(
@@ -56,9 +58,10 @@ def _metrics(
         rho_block=block,
         rho_mlp=np.zeros(n_layers),
         n_prompt_tokens=3,
-        n_output_tokens=5,
+        n_output_tokens=n_output_tokens,
         n_layers=n_layers,
         dtype=dtype,
+        trajectory_span=trajectory_span,
     )
 
 
@@ -171,15 +174,15 @@ def test_load_labeled_turns_and_cli(tmp_path) -> None:  # type: ignore[no-untype
     report = json.loads(out.read_text())
     assert report["n_by_type"] == {"tool_use": 20, "reasoning": 20}
     assert any(k["name"].startswith("kill1") for k in report["kills_hash7"])
-    # length-confound control is serialized per probe
-    assert "correctness[reasoning]" in report["length_control"]
-    assert set(report["length_control"]["correctness[reasoning]"]) == {
-        "label",
+    # length-confound control is serialized, nested by task type then kind
+    assert set(report["length_control"]["reasoning"]) == {"correctness", "difficulty"}
+    assert set(report["length_control"]["reasoning"]["correctness"]) == {
         "geometry_auc",
         "length_auc",
         "combined_auc",
         "marginal",
     }
+    assert "reasoning->tool_use" in report["cross_transfer_length"]  # kill3 length baseline
 
 
 def test_length_control_isolates_the_length_confound() -> None:
@@ -190,17 +193,33 @@ def test_length_control_isolates_the_length_confound() -> None:
     turns = []
     for i in range(60):
         correct = i % 2 == 0
-        m = _metrics(mean_speed=float(rng.normal(3.0, 1.0)))  # geometry = noise
-        object.__setattr__(m, "n_output_tokens", int(rng.normal(120 if correct else 30, 4)))
+        m = _metrics(  # geometry = noise, length tracks correctness
+            mean_speed=float(rng.normal(3.0, 1.0)),
+            n_output_tokens=int(rng.normal(120 if correct else 30, 4)),
+        )
         turns.append(LabeledTurn("reasoning", correct, False, m))
     rep = evaluate_floor_test(turns)
-    lc = rep.length_control["correctness[reasoning]"]
-    assert lc.label == "correctness"
+    lc = rep.length_control["reasoning"]["correctness"]
     assert lc.length_auc is not None and lc.length_auc > 0.85  # length separates cleanly
     assert lc.geometry_auc is not None
     assert lc.length_auc > lc.geometry_auc  # length beats geometry -> the confound
     assert lc.marginal is not None  # combined - length is computable
-    assert "difficulty[reasoning]" in rep.length_control
+    assert "difficulty" in rep.length_control["reasoning"]
+
+
+def test_length_control_span_aware_length() -> None:
+    # The length feature must span the SAME tokens the geometry did: output-only by
+    # default, prompt+output for span="full" (else a full-span corpus with a prompt-length
+    # confound escapes the control -- the most severe review finding on this diagnostic).
+    from pumpkinspice.introspect.evaluate import _length_of
+
+    assert _length_of(_metrics(mean_speed=1.0, n_output_tokens=50)) == 50.0  # output span
+    assert (
+        _length_of(  # full span: n_prompt_tokens(3) + n_output_tokens(50)
+            _metrics(mean_speed=1.0, n_output_tokens=50, trajectory_span="full")
+        )
+        == 53.0
+    )
 
 
 def test_empty_turns_raises() -> None:
