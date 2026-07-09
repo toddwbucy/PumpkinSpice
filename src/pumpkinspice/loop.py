@@ -72,6 +72,21 @@ def _item_count(state: dict[str, Any], code: str) -> int:
     return 0
 
 
+def fight_won_vs(outcome: dict[str, Any], monster: str) -> bool:
+    """True if a turn's action was a fight WON against ``monster``. Reads the HeroBench
+    fight response captured in ``outcome["data"]["fight"]`` (``result == "win"`` and
+    ``monster == <code>``). The win/loss + fought-monster are authoritative there,
+    independent of the ~5%-rate item drop, which is why the v2 capability goal scores on
+    this rather than a drop or a level proxy."""
+    data = outcome.get("data")
+    if not isinstance(data, dict):
+        return False
+    fight = data.get("fight")
+    if not isinstance(fight, dict):
+        return False
+    return fight.get("result") == "win" and fight.get("monster") == monster
+
+
 class AgentLoop:
     def __init__(
         self,
@@ -89,6 +104,7 @@ class AgentLoop:
         goal_level: int | None = None,
         goal_skill: str | None = None,
         goal_state_key: str | None = None,
+        goal_monster: str | None = None,
     ) -> None:
         self.decoder = decoder
         self.retrieval = retrieval
@@ -110,6 +126,10 @@ class AgentLoop:
         # own solved-ness directly, e.g. HanoiWorld's "solved" -- no item/level
         # counting needed).
         self.goal_state_key = goal_state_key
+        # goal_monster: success = the run WON a fight vs this monster code (the v2
+        # capability-milestone goal). Unlike the others this is OUTCOME-based (read from
+        # the fight response captured in a turn, not world state) -- see fight_won_vs.
+        self.goal_monster = goal_monster
         self._goal_baseline = 0  # count of goal_item at run start (set in play())
         # In-context working memory: the agent's own prior turns, fed back into the
         # prompt. NOT persisted, NOT written back to any store (the agent's DB role
@@ -231,8 +251,17 @@ class AgentLoop:
         inventory, which would otherwise read as an instant false completion. Level
         goals are absolute (you cannot un-level). A fresh get_state is the reliable
         post-action source (the action response nests the character per verb)."""
-        if self.goal_item is None and self.goal_level is None and self.goal_state_key is None:
+        if (
+            self.goal_item is None
+            and self.goal_level is None
+            and self.goal_state_key is None
+            and self.goal_monster is None
+        ):
             return False
+        # Outcome-based goal (v2): won a fight vs the target monster. Checked on the
+        # captured turns (the win is in the fight response), not world state.
+        if self.goal_monster is not None:
+            return any(fight_won_vs(t.outcome, self.goal_monster) for t in self._turns)
         try:
             state = self.world.get_state().raw
         except Exception:  # never let a goal check abort an otherwise-fine run

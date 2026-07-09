@@ -74,6 +74,7 @@ def _build_loop(cfg: RunConfig) -> AgentLoop:
         goal_level=cfg.run.get("goal_level"),
         goal_skill=cfg.run.get("goal_skill"),
         goal_state_key=cfg.run.get("goal_state_key"),
+        goal_monster=cfg.run.get("goal_monster"),
     )
 
 

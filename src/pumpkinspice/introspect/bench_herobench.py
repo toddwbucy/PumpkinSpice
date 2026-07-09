@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from pumpkinspice import analyze
+from pumpkinspice.loop import fight_won_vs  # lightweight core helper (no numpy)
 
 if TYPE_CHECKING:
     # Only needed for the LabelFn return annotation (a string under `from __future__
@@ -52,6 +53,9 @@ class RampTask:
     goal_item: str | None = None
     goal_level: int | None = None
     goal_skill: str | None = None
+    # v2 capability-milestone goal: scored on WINNING a fight vs this monster (from the
+    # fight response), not a drop or a level proxy. See loop.fight_won_vs.
+    goal_monster: str | None = None
 
 
 # Difficulty rises with gear-dependency depth. easy (hard=False) = doable from the
@@ -102,9 +106,49 @@ RAMP: dict[str, RampTask] = {
 }
 
 
+def _v2_task(monster_phrase: str) -> str:
+    """A fair, ICL-free capability-milestone prompt: state the goal and tell the model to
+    plan FROM RETRIEVAL (no worked example, no solution spelled out) -- the model must look
+    up the monster's level/resistances and decide how to gear and level up."""
+    return (
+        f"Defeat a {monster_phrase}. You start at level 1 with a wooden stick equipped. "
+        "Check the monster's level and resistances in the reference notes and plan how to "
+        "beat it -- gathering, crafting a suitable weapon, leveling up, and healing as needed."
+    )
+
+
+# v2 capability-milestone ladder (docs/floor-test-v2-design.md 8.1). Each task is "win a
+# fight vs monster M", scored by loop.fight_won_vs -- the WIN is authoritative, unlike the
+# ~5%-rate drop (which is why the RAMP's yellow_slime tier had to fall back to goal_level).
+# Difficulty = level-gap from a fresh L1 char x counter-element: easy (hard=False) = winnable
+# at/near L1 with the right element (chicken has no resist; yellow_slime resists earth so the
+# stick is weak -> the L1 copper_dagger's air damage wins); hard (hard=True) = the air-resist
+# and high-HP tiers that require leveling to out-damage. The roster caps distinct monsters per
+# difficulty class (~2 easy, ~4 hard) -- the documented kill1-generalization limit.
+V2_LADDER: dict[str, RampTask] = {
+    t.name: t
+    for t in (
+        RampTask("v2_chicken", _v2_task("chicken"), hard=False, goal_monster="chicken"),
+        RampTask(
+            "v2_yellow_slime", _v2_task("yellow slime"), hard=False, goal_monster="yellow_slime"
+        ),
+        RampTask("v2_green_slime", _v2_task("green slime"), hard=True, goal_monster="green_slime"),
+        RampTask("v2_blue_slime", _v2_task("blue slime"), hard=True, goal_monster="blue_slime"),
+        RampTask("v2_red_slime", _v2_task("red slime"), hard=True, goal_monster="red_slime"),
+        RampTask("v2_cow", _v2_task("cow"), hard=True, goal_monster="cow"),
+    )
+}
+
+
 def eventual_correct(turns: list[dict[str, Any]], task: RampTask) -> bool:
     """Episode-level correctness: did the run reach ``task``'s goal within its budget?
-    Reuses analyze.analyze_turns so this matches the harness's own success semantics."""
+
+    For a v2 capability goal (``goal_monster``) success = the run WON a fight vs that
+    monster (loop.fight_won_vs on the captured outcomes) -- the same detector the runtime
+    goal-stop uses, so runtime and post-hoc agree. Otherwise reuses analyze.analyze_turns
+    (goal_item/level/skill), the harness's own success semantics."""
+    if task.goal_monster is not None:
+        return any(fight_won_vs(t.get("outcome", {}) or {}, task.goal_monster) for t in turns)
     metrics = analyze.analyze_turns(
         "floortest",
         turns,
