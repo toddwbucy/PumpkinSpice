@@ -135,19 +135,25 @@ def test_decoder_failure_costs_one_turn_not_the_run(
 
 
 class _FightWorld:
-    """act() returns a WON fight vs chicken -- the goal-monster stop signal (outcome-based,
-    unlike the state-based item/level goals)."""
+    """Returns a WON fight vs chicken ONLY for a fight action (win is action-DEPENDENT, so
+    the test would catch a mis-parsed/wrong action or an over-eager stop); other actions
+    return a plain ok with no fight block."""
 
     name = "fightworld"
+
+    def __init__(self, result: str = "win") -> None:
+        self.result = result
 
     def get_state(self) -> WorldState:
         return WorldState(raw={"x": 0, "y": 0, "level": 1})
 
     def act(self, action: Action) -> ActionResult:
+        if action.kind != "fight":
+            return ActionResult(ok=True, status_code=200, data={})
         return ActionResult(
             ok=True,
             status_code=200,
-            data={"fight": {"result": "win", "monster": "chicken"}},
+            data={"fight": {"result": self.result, "monster": "chicken"}},
         )
 
 
@@ -158,27 +164,39 @@ class _FightDecoder:
         return '{"action": "fight", "args": {}}'
 
 
-def test_stop_on_goal_monster(tmp_path: Path) -> None:
-    loop = AgentLoop(
+def _fight_loop(world: object, tmp_path: Path) -> AgentLoop:
+    return AgentLoop(
         decoder=_FightDecoder(),
         retrieval=kernel.load_plugin("retrieval", "null", {}),
-        world=_FightWorld(),  # type: ignore[arg-type]
+        world=world,  # type: ignore[arg-type]
         prompt=kernel.load_plugin("prompt", "default", {}),
         capture=kernel.load_plugin("capture", "jsonl", {"path": str(tmp_path / "c.jsonl")}),
         task="beat a chicken",
         goal_monster="chicken",
     )
-    turns = loop.play(5)
+
+
+def test_stop_on_goal_monster(tmp_path: Path) -> None:
+    turns = _fight_loop(_FightWorld(result="win"), tmp_path).play(5)
     assert len(turns) == 1  # stopped after the first winning fight, not the full budget
+
+
+def test_goal_monster_loss_plays_full_budget(tmp_path: Path) -> None:
+    # a LOSS never satisfies goal_monster, so the run must NOT stop early (negative control
+    # against an over-eager stop that would fire on any fight turn)
+    turns = _fight_loop(_FightWorld(result="lose"), tmp_path).play(3)
+    assert len(turns) == 3
 
 
 def test_fight_won_vs() -> None:
     win = {"data": {"fight": {"result": "win", "monster": "chicken"}}}
     assert fight_won_vs(win, "chicken") is True
     assert fight_won_vs(win, "cow") is False  # won, but not the objective monster
+    # "lose" is HeroBench's actual FightResult token (not "loss")
     assert (
-        fight_won_vs({"data": {"fight": {"result": "loss", "monster": "chicken"}}}, "chicken")
+        fight_won_vs({"data": {"fight": {"result": "lose", "monster": "chicken"}}}, "chicken")
         is False
     )
     assert fight_won_vs({"ok": True}, "chicken") is False  # no data
     assert fight_won_vs({"data": {}}, "chicken") is False  # data but no fight (non-fight action)
+    assert fight_won_vs("boom", "chicken") is False  # non-dict outcome guard (foreign capture)

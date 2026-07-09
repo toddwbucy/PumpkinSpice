@@ -20,7 +20,7 @@ retrieval    = "pgvector"
 world        = "herobench"
 prompt       = "react"
 capture      = "jsonl"
-task         = "Defeat a chicken. You start at level 1 with a wooden stick equipped. Check the monster's level and resistances in the reference notes and plan how to beat it -- gathering, crafting a suitable weapon, leveling up, and healing as needed."
+task         = "Defeat a chicken. You start at level 1 with a wooden stick equipped. Use the reference notes to plan how to beat it."
 goal_monster = "chicken"
 max_turns    = 25
 

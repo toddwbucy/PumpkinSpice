@@ -16,6 +16,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pumpkinspice.loop import fight_won_vs
+
 
 @dataclass
 class RunMetrics:
@@ -67,7 +69,8 @@ def _state_after(turn: dict[str, Any]) -> dict[str, Any]:
     the state observed at the turn's start. Craft/gather/fight responses nest the
     updated character under "character" (a SkillResponse), so unwrap that first --
     otherwise the post-craft inventory (the new dagger) is invisible to success."""
-    data = turn.get("outcome", {}).get("data")
+    outcome = turn.get("outcome")
+    data = outcome.get("data") if isinstance(outcome, dict) else None
     if isinstance(data, dict):
         char = data.get("character")
         if isinstance(char, dict) and ("level" in char or "inventory" in char or "x" in char):
@@ -91,6 +94,7 @@ def analyze_turns(
     goal_level: int | None = None,
     goal_skill: str | None = None,
     goal_state_key: str | None = None,
+    goal_monster: str | None = None,
 ) -> RunMetrics:
     if not turns:
         return RunMetrics(name, "", "", 0, None, 0, 0, 0, 0, None, None, 0.0, 0.0)
@@ -116,7 +120,11 @@ def analyze_turns(
     final_inv = _inventory(final_state)
 
     success: bool | None = None
-    if goal_state_key is not None:
+    if goal_monster is not None:
+        # v2 capability goal: won a fight vs the monster (same detector the runtime goal-stop
+        # uses -> analyze and eventual_correct agree). Precedence matches loop._goal_reached.
+        success = any(fight_won_vs(t.get("outcome", {}), goal_monster) for t in turns)
+    elif goal_state_key is not None:
         success = bool(final_state.get(goal_state_key))
     elif goal_item is not None:
         # Crafted THIS run: more of the goal item than at the start (a reset character
@@ -179,6 +187,7 @@ def load_metrics(
     goal_level: int | None = None,
     goal_skill: str | None = None,
     goal_state_key: str | None = None,
+    goal_monster: str | None = None,
 ) -> RunMetrics:
     turns = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
     return analyze_turns(
@@ -188,6 +197,7 @@ def load_metrics(
         goal_level=goal_level,
         goal_skill=goal_skill,
         goal_state_key=goal_state_key,
+        goal_monster=goal_monster,
     )
 
 

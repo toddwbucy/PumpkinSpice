@@ -110,6 +110,7 @@ def _build_loop(cfg: RunConfig, capture: _WebCapture) -> AgentLoop:
         goal_level=cfg.run.get("goal_level"),
         goal_skill=cfg.run.get("goal_skill"),
         goal_state_key=cfg.run.get("goal_state_key"),
+        goal_monster=cfg.run.get("goal_monster"),
     )
 
 
@@ -144,6 +145,8 @@ class RunManager:
             goal = f"{skill + '_' if skill else ''}level>={cfg.run.get('goal_level')}"
         if not goal and cfg.run.get("goal_state_key"):
             goal = f"state:{cfg.run['goal_state_key']}"
+        if not goal and cfg.run.get("goal_monster"):
+            goal = f"monster:{cfg.run['goal_monster']}"
         record = RunRecord(
             id=run_id,
             config_name=label,
@@ -287,9 +290,12 @@ class RunManager:
         goal_level: int | None = None
         goal_skill: str | None = None
         goal_state_key: str | None = None
+        goal_monster: str | None = None
         m = re.match(r"^(?:([a-z_]+)_)?level>=(\d+)$", record.goal)
         if record.goal.startswith("state:"):
             goal_state_key = record.goal[len("state:") :]
+        elif record.goal.startswith("monster:"):
+            goal_monster = record.goal[len("monster:") :]
         elif m:
             goal_skill, goal_level = m.group(1), int(m.group(2))
         elif record.goal:
@@ -301,6 +307,7 @@ class RunManager:
             goal_level=goal_level,
             goal_skill=goal_skill,
             goal_state_key=goal_state_key,
+            goal_monster=goal_monster,
         )
         # the model under test may be ambient (not in the config); recover it from the
         # turns' recorded model id if so.

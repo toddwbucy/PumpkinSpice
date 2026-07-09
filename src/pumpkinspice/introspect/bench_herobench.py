@@ -28,7 +28,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from pumpkinspice import analyze
-from pumpkinspice.loop import fight_won_vs  # lightweight core helper (no numpy)
 
 if TYPE_CHECKING:
     # Only needed for the LabelFn return annotation (a string under `from __future__
@@ -49,7 +48,12 @@ class RampTask:
 
     name: str
     task: str
-    hard: bool  # independent difficulty label (kill #1): requires the crafting chain?
+    # Independent difficulty label for kill #1. Its SEMANTICS are per-ladder, and RAMP vs
+    # V2_LADDER captures are SEPARATE corpora that must not be pooled on this axis: in RAMP
+    # hard = requires the crafting chain; in V2_LADDER hard = requires LEVELING to out-damage
+    # (yellow_slime needs a craft but no leveling, so it is hard=True in RAMP, hard=False in
+    # V2_LADDER -- the same monster, two different difficulty axes).
+    hard: bool
     goal_item: str | None = None
     goal_level: int | None = None
     goal_skill: str | None = None
@@ -107,24 +111,29 @@ RAMP: dict[str, RampTask] = {
 
 
 def _v2_task(monster_phrase: str) -> str:
-    """A fair, ICL-free capability-milestone prompt: state the goal and tell the model to
-    plan FROM RETRIEVAL (no worked example, no solution spelled out) -- the model must look
-    up the monster's level/resistances and decide how to gear and level up."""
+    """A fair, ICL-free capability-milestone prompt: state the goal and point the model at
+    retrieval to plan. It does NOT name the solution steps (gather/craft/level/heal) -- that
+    is the planning the IV measures, and naming it would bias the arm and push the chicken
+    positive control into needless crafting."""
     return (
         f"Defeat a {monster_phrase}. You start at level 1 with a wooden stick equipped. "
-        "Check the monster's level and resistances in the reference notes and plan how to "
-        "beat it -- gathering, crafting a suitable weapon, leveling up, and healing as needed."
+        "Use the reference notes to plan how to beat it."
     )
 
 
 # v2 capability-milestone ladder (docs/floor-test-v2-design.md 8.1). Each task is "win a
 # fight vs monster M", scored by loop.fight_won_vs -- the WIN is authoritative, unlike the
 # ~5%-rate drop (which is why the RAMP's yellow_slime tier had to fall back to goal_level).
-# Difficulty = level-gap from a fresh L1 char x counter-element: easy (hard=False) = winnable
-# at/near L1 with the right element (chicken has no resist; yellow_slime resists earth so the
-# stick is weak -> the L1 copper_dagger's air damage wins); hard (hard=True) = the air-resist
-# and high-HP tiers that require leveling to out-damage. The roster caps distinct monsters per
-# difficulty class (~2 easy, ~4 hard) -- the documented kill1-generalization limit.
+# Difficulty = level-gap from a fresh L1 char x counter-element (this ladder's `hard` axis,
+# DISTINCT from RAMP's crafting-chain axis; see RampTask.hard): easy (hard=False) = winnable
+# at/near L1 (chicken has no resist; yellow_slime resists earth but the L1 copper_dagger's air
+# damage wins -- a craft, no leveling); hard (hard=True) = the air-resist and high-HP tiers
+# that require LEVELING to out-damage. The roster caps distinct monsters per difficulty class
+# (~2 easy, ~4 hard) -- the documented kill1-generalization limit.
+#
+# UNLIKE the fixed-100-turn RAMP, v2 tiers are STOP-ON-GOAL: an episode ends at the first win
+# (goal_monster in [run]), and the measured metric is the FIRST planning turn (design doc 4.2),
+# not the full trajectory -- so v2 captures are NOT budget-comparable to RAMP captures.
 V2_LADDER: dict[str, RampTask] = {
     t.name: t
     for t in (
@@ -139,22 +148,23 @@ V2_LADDER: dict[str, RampTask] = {
     )
 }
 
+# One registry so CLI tier lookups / help find both ladders (RAMP is v1, V2_LADDER is v2).
+TASKS: dict[str, RampTask] = {**RAMP, **V2_LADDER}
+
 
 def eventual_correct(turns: list[dict[str, Any]], task: RampTask) -> bool:
     """Episode-level correctness: did the run reach ``task``'s goal within its budget?
 
-    For a v2 capability goal (``goal_monster``) success = the run WON a fight vs that
-    monster (loop.fight_won_vs on the captured outcomes) -- the same detector the runtime
-    goal-stop uses, so runtime and post-hoc agree. Otherwise reuses analyze.analyze_turns
-    (goal_item/level/skill), the harness's own success semantics."""
-    if task.goal_monster is not None:
-        return any(fight_won_vs(t.get("outcome", {}) or {}, task.goal_monster) for t in turns)
+    Delegates entirely to analyze.analyze_turns (the single success-semantics source, incl.
+    the v2 ``goal_monster`` won-fight arm), so this bench path and the analyze/sweep/web
+    surfaces cannot disagree."""
     metrics = analyze.analyze_turns(
         "floortest",
         turns,
         goal_item=task.goal_item,
         goal_level=task.goal_level,
         goal_skill=task.goal_skill,
+        goal_monster=task.goal_monster,
     )
     return bool(metrics.success)
 

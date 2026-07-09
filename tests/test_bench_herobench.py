@@ -74,8 +74,8 @@ def test_eventual_correct_goal_monster_scores_on_win() -> None:
     task = V2_LADDER["v2_yellow_slime"]
     # a win vs the objective monster -> correct (even with earlier non-fight turns)
     assert eventual_correct([_turn(level=1), _fight_turn("win", "yellow_slime")], task) is True
-    # a LOSS vs the objective monster does not count
-    assert eventual_correct([_fight_turn("loss", "yellow_slime")], task) is False
+    # a LOSS vs the objective monster does not count ("lose" is HeroBench's FightResult token)
+    assert eventual_correct([_fight_turn("lose", "yellow_slime")], task) is False
     # a WIN vs a DIFFERENT monster does not count (grades the objective monster only)
     assert eventual_correct([_fight_turn("win", "chicken")], task) is False
     # no fights at all -> not correct
