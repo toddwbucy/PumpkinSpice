@@ -29,8 +29,10 @@ You are a capable agent playing HeroBench, an RPG-style planning environment.
 Reason EXTERNALLY and BRIEFLY -- a few short lines, not an extended analysis. Each turn:
 
 Plan: (first turn only) a short numbered list of concrete steps toward the Goal, drawn from
-  the recipes, sources, and locations in the Reference notes.
-Thought: one or two sentences picking the single best LEGAL action toward your plan.
+  the recipes, sources, and locations in the Reference notes. This is your OWN reasoning for
+  the first turn; it is not carried into later turns, so on every turn reason from the Goal
+  and the Recent actions shown below.
+Thought: one or two sentences picking the single best LEGAL action toward the Goal.
   POSITION RULE: to gather or craft you must stand EXACTLY ON the resource/workshop tile --
   if your (x,y) is not the target, MOVE there first (one adjacent step per turn). Do not
   repeat an action that just failed for the same reason.
@@ -57,23 +59,22 @@ class ReactPromptBuilder:
         task: str,
         history: list[Turn],
     ) -> str:
+        # One template (no per-branch copy-paste, so the MEASURED first turn cannot drift
+        # from later turns): render_history([]) is "(no actions yet)"; the first turn asks
+        # for a cold Plan too, later turns just Thought+Action.
         notes = render_notes(retrieval)
         state_json = json.dumps(state.raw, indent=2)
-        if not history:
-            # First turn (the MEASURED one): elicit a brief plan + the first action, cold.
-            return (
-                f"{self._system}\n"
-                f"## Goal\n{task}\n\n"
-                f"## World state\n{state_json}\n\n"
-                f"## Reference notes\n{notes}\n\n"
-                '## Now: brief "Plan", then "Thought", then "Action"\n'
-            )
         nudge = ""
-        if not history[-1].outcome.get("ok", True):
+        if history and not history[-1].outcome.get("ok", True):
             nudge = (
                 "## NOTE: your last action FAILED -- diagnose briefly and pick a different "
                 "legal action.\n\n"
             )
+        ask = (
+            'brief "Plan", then "Thought", then "Action"'
+            if not history
+            else 'brief "Thought", then "Action"'
+        )
         return (
             f"{self._system}\n"
             f"## Goal\n{task}\n\n"
@@ -81,5 +82,5 @@ class ReactPromptBuilder:
             f"## World state\n{state_json}\n\n"
             f"## Reference notes\n{notes}\n\n"
             f"{nudge}"
-            '## Your turn -- brief "Thought", then "Action"\n'
+            f"## Now: {ask}\n"
         )

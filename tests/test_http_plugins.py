@@ -58,7 +58,9 @@ def test_lmstudio_max_tokens_default_and_unbounded() -> None:
     assert captured["max_tokens"] == 256
 
 
-def test_enable_thinking_and_extra_body() -> None:
+def test_enable_thinking_and_extra_body(caplog) -> None:  # type: ignore[no-untyped-def]
+    import logging
+
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -66,19 +68,38 @@ def test_enable_thinking_and_extra_body() -> None:
         captured.update(json.loads(request.content))
         return httpx.Response(200, json={"choices": [{"message": {"content": "a"}}]})
 
-    # enable_thinking=False -> vLLM chat_template_kwargs in the payload (the v2 no-think IV)
-    d = LMStudioDecoder({"base_url": "http://x", "enable_thinking": False})
-    d._client = _mock_client(handler, "http://x")
-    d.complete("hi")
+    # enable_thinking=False -> vLLM chat_template_kwargs in the payload (the v2 no-think IV);
+    # LMStudio does not honor it, so it warns (backend-support guard).
+    with caplog.at_level(logging.WARNING):
+        d = LMStudioDecoder({"base_url": "http://x", "enable_thinking": False})
+        d._client = _mock_client(handler, "http://x")
+        d.complete("hi")
     assert captured["chat_template_kwargs"] == {"enable_thinking": False}
+    assert any("chat_template_kwargs" in r.message for r in caplog.records)
 
-    # a general extra_body passthrough merges into the payload; unset enable_thinking is
-    # not sent (the internal-CoT baseline arm = the model's default).
-    d2 = LMStudioDecoder({"base_url": "http://x", "extra_body": {"guided_choice": ["a", "b"]}})
+    # The dedicated flag WINS over a pre-existing chat_template_kwargs.enable_thinking
+    # (plain assign, not setdefault) -- the IV cannot be silently inverted.
+    d2 = LMStudioDecoder(
+        {
+            "base_url": "http://x",
+            "enable_thinking": False,
+            "extra_body": {"chat_template_kwargs": {"enable_thinking": True}},
+        }
+    )
     d2._client = _mock_client(handler, "http://x")
     d2.complete("hi")
-    assert captured["guided_choice"] == ["a", "b"]
-    assert "chat_template_kwargs" not in captured
+    assert captured["chat_template_kwargs"]["enable_thinking"] is False
+
+    # extra_body must NOT clobber the greedy/parity sampler (merged before it), and a
+    # general passthrough field still reaches the payload.
+    d3 = LMStudioDecoder(
+        {"base_url": "http://x", "extra_body": {"temperature": 0.9, "guided_choice": ["a"]}}
+    )
+    d3._client = _mock_client(handler, "http://x")
+    d3.complete("hi")
+    assert captured["temperature"] == 0  # greedy default wins over extra_body
+    assert captured["guided_choice"] == ["a"]  # non-reserved field passes through
+    assert "chat_template_kwargs" not in captured  # unset enable_thinking -> not sent
 
 
 def test_lmstudio_captures_reasoning() -> None:

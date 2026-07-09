@@ -73,9 +73,13 @@ book does the multi-hop graph walk build-side so the runtime `relational` retrie
 is a plain lookup (see "recipe book" below); re-run `seed_recipe_book.py` after
 `seed_relational_pg.py` whenever the schema tables change.
 
-Planning-ablation strategies (the `prompt` slot, all sharing the Reflexion+ReAct CoT):
-`default` = reactive (Stage 1), `plan` = commit-and-execute (Stage 2), `replan` =
-plan + replan-on-surprise (Stage 3). Configs: `copper_dagger{,_plan,_replan}.toml`
+Planning-ablation strategies (the `prompt` slot). The internal-CoT family shares the
+Reflexion+ReAct CoT: `default` = reactive (Stage 1), `plan` = commit-and-execute (Stage 2),
+`replan` = plan + replan-on-surprise (Stage 3), `executor` = harness-held plan (Stage 4).
+`react` is DIFFERENT: it is the floor-test v2 externalized-reasoning strategy -- bounded,
+BRIEF external steps meant to be paired with a no-think decoder (`enable_thinking = false`),
+so it does NOT rely on the internal CoT (see `docs/floor-test-v2-design.md`).
+Configs: `copper_dagger{,_plan,_replan}.toml`
 (all set `goal_item` so the run stops on completion). Compare with `pumpkinspice
 analyze` (the `rplan` column counts plan rewrites). `sweep -c <cfg> -m a:N,b` runs a
 config across models with per-model `:N` max_tokens caps.
