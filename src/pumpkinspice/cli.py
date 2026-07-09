@@ -26,6 +26,7 @@ import httpx
 
 from . import kernel, parity, transport
 from .config import RunConfig, load_config
+from .episode import reset_herobench_character, stochastic_sampler
 from .logging import configure_logging, get_logger
 from .loop import AgentLoop
 
@@ -400,6 +401,83 @@ def _cmd_sweep(args: argparse.Namespace) -> int:  # pragma: no cover - runs real
     return 0
 
 
+def _v2_episode_config(
+    base_path: str, task: Any, ep: int, seed: int, out_dir: Path
+) -> tuple[RunConfig, Path]:
+    """Build the per-episode RunConfig from a base config: the ladder task string, ALL of the
+    ladder task's goal fields (overwriting any stale base-config goal, so a RAMP tier gets its
+    item/level goal and a v2 tier its monster goal -- no leak), a genuinely-stochastic sampler
+    for this episode's seed (top_k un-pinned so the seed is not inert), and a per-episode
+    capture path keyed on the EPISODE INDEX (+ seed). Pure (only load_config IO), so testable
+    without a live model."""
+    cfg = load_config(base_path)
+    cfg.run["task"] = task.task
+    cfg.run["goal_item"] = task.goal_item
+    cfg.run["goal_level"] = task.goal_level
+    cfg.run["goal_skill"] = task.goal_skill
+    cfg.run["goal_monster"] = task.goal_monster
+    temperature = float(cfg.slots.get("decoder", {}).get("sampler", {}).get("temperature", 0.7))
+    cfg.slots.setdefault("decoder", {})["sampler"] = stochastic_sampler(temperature, seed)
+    path = out_dir / f"{task.name}__ep{ep:03d}_seed{seed:03d}.jsonl"
+    cfg.slots.setdefault("capture", {})["path"] = str(path)
+    return cfg, path
+
+
+def _cmd_v2run(args: argparse.Namespace) -> int:  # pragma: no cover - runs real model plays
+    """Stochastic per-episode runner for the v2 floor test: run N episodes of a ladder tier
+    (or `all`), each with a distinct decode seed (temperature > 0 -> per-episode outcome
+    variation near the frontier), capturing each episode separately. Resets the character
+    between episodes (HeroBench worlds only) so they are IID from a fresh baseline."""
+    try:
+        from .introspect import bench_herobench as bh
+    except ModuleNotFoundError as exc:
+        log.error(
+            "v2run needs the introspect extra (numpy): `uv sync --extra introspect` (%s)", exc
+        )
+        return 2
+
+    tiers = list(bh.V2_LADDER) if args.tier == "all" else [args.tier]
+    unknown = [t for t in tiers if t not in bh.TASKS]
+    if unknown:
+        log.error("unknown --tier %s; choices: %s, all", unknown, ", ".join(bh.TASKS))
+        return 2
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for tier in tiers:
+        task = bh.TASKS[tier]
+        for ep in range(args.episodes):
+            seed = args.seed_base + ep
+            cfg, path = _v2_episode_config(args.config, task, ep, seed, out_dir)
+            if path.exists():
+                # JsonlCapture APPENDS -> never write onto an existing capture (would duplicate
+                # rows). Skip; delete the file (or use a fresh --out-dir/--seed-base) to re-run.
+                log.warning("v2run: %s exists -> skipping (delete it to re-run)", path)
+                continue
+            # Reset only for a HeroBench world: a mock/hanoi world has no character, and a blind
+            # delete/create could clobber an unrelated HeroBench serving on :8000.
+            if not args.no_reset and cfg.plugin_name("world") == "herobench":
+                world = cfg.slot_config("world")
+                try:
+                    reset_herobench_character(
+                        str(world.get("base_url", "http://127.0.0.1:8000")),
+                        str(world.get("character", "hero")),
+                    )
+                except Exception as exc:
+                    log.warning("v2run: reset failed for %s ep=%d (%s); skipping", tier, ep, exc)
+                    continue
+            log.info("v2run: tier=%s ep=%d seed=%d -> %s", tier, ep, seed, path)
+            try:
+                turns = _build_loop(cfg).play(cfg.max_turns)
+            except Exception as exc:
+                log.error("v2run: tier=%s ep=%d FAILED (%s); continuing", tier, ep, exc)
+                continue
+            log.info("  tier=%s ep=%d: %d turns", tier, ep, len(turns))
+            n += 1
+    log.info("v2run: wrote %d episode captures to %s", n, out_dir)
+    return 0
+
+
 def _load_env_local(env_file: Path | None = None) -> None:
     """Load scoped DB credentials from the repo's .env.local into the environment,
     so `serve` can build retrieval plugins without the operator sourcing it first.
@@ -577,6 +655,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--goal-state-key", help="success = state[key] is truthy (e.g. 'solved' for Hanoi)"
     )
     sweepp.set_defaults(func=_cmd_sweep)
+
+    v2runp = sub.add_parser(
+        "v2run", help="stochastic per-episode v2 runner (N seeded episodes per ladder tier)"
+    )
+    v2runp.add_argument(
+        "--config", required=True, help="base config (decoder/retrieval/world, prompt=react)"
+    )
+    v2runp.add_argument(
+        "--tier", required=True, help="a V2_LADDER/RAMP tier name, or 'all' for every v2 tier"
+    )
+    v2runp.add_argument(
+        "--episodes", type=int, default=20, help="episodes per tier (each a distinct seed)"
+    )
+    v2runp.add_argument(
+        "--seed-base", type=int, default=0, help="first seed; episode k uses seed_base + k"
+    )
+    v2runp.add_argument("--out-dir", default="captures/v2", help="dir for per-episode captures")
+    v2runp.add_argument(
+        "--no-reset",
+        action="store_true",
+        help="do NOT delete+recreate the character between episodes (episodes share state)",
+    )
+    v2runp.set_defaults(func=_cmd_v2run)
 
     servep = sub.add_parser("serve", help="run the web frontend API (needs the 'web' extra)")
     servep.add_argument("--host", default="127.0.0.1")

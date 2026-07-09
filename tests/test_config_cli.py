@@ -113,3 +113,30 @@ def test_cli_analyze(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None
     out = capsys.readouterr().out
     assert rc == 0
     assert "m1" in out and "steps" in out
+
+
+def test_v2_episode_config(tmp_path: Path) -> None:
+    pytest.importorskip("numpy")  # bench_herobench -> introspect/__init__ -> geometry (numpy)
+    from pumpkinspice.cli import _v2_episode_config
+    from pumpkinspice.introspect.bench_herobench import RAMP, V2_LADDER
+
+    base = "configs/v2_smoke_chicken_qwen3_8b.toml"
+    task = V2_LADDER["v2_yellow_slime"]
+    cfg, path = _v2_episode_config(base, task, ep=3, seed=7, out_dir=tmp_path)
+    assert cfg.run["task"] == task.task
+    # ALL goal fields set from the task: a v2 tier -> monster goal, item/level cleared to None
+    assert cfg.run["goal_monster"] == "yellow_slime"
+    assert cfg.run["goal_item"] is None and cfg.run["goal_level"] is None
+    # a genuinely-stochastic sampler for this seed (top_k un-pinned so the seed is not inert)
+    s = cfg.slots["decoder"]["sampler"]
+    assert s["seed"] == 7 and s["top_k"] == 0 and s["temperature"] == 0.7
+    # filename keyed on the episode INDEX (+ seed), not the seed alone
+    assert path == tmp_path / "v2_yellow_slime__ep003_seed007.jsonl"
+    assert cfg.slots["capture"]["path"] == str(path)
+    assert cfg.run["prompt"] == "react"  # base config's externalized react arm preserved
+
+    # a RAMP tier sets its item goal and CLEARS the base config's monster goal (no stale leak)
+    ramp = RAMP["copper_dagger"]  # goal_item, goal_monster is None
+    cfg2, _ = _v2_episode_config(base, ramp, ep=0, seed=0, out_dir=tmp_path)
+    assert cfg2.run["goal_item"] == "copper_dagger"
+    assert cfg2.run["goal_monster"] is None  # base config's "chicken" overwritten -> no leak
