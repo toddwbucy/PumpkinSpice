@@ -58,6 +58,29 @@ def test_lmstudio_max_tokens_default_and_unbounded() -> None:
     assert captured["max_tokens"] == 256
 
 
+def test_enable_thinking_and_extra_body() -> None:
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.clear()
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "a"}}]})
+
+    # enable_thinking=False -> vLLM chat_template_kwargs in the payload (the v2 no-think IV)
+    d = LMStudioDecoder({"base_url": "http://x", "enable_thinking": False})
+    d._client = _mock_client(handler, "http://x")
+    d.complete("hi")
+    assert captured["chat_template_kwargs"] == {"enable_thinking": False}
+
+    # a general extra_body passthrough merges into the payload; unset enable_thinking is
+    # not sent (the internal-CoT baseline arm = the model's default).
+    d2 = LMStudioDecoder({"base_url": "http://x", "extra_body": {"guided_choice": ["a", "b"]}})
+    d2._client = _mock_client(handler, "http://x")
+    d2.complete("hi")
+    assert captured["guided_choice"] == ["a", "b"]
+    assert "chat_template_kwargs" not in captured
+
+
 def test_lmstudio_captures_reasoning() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

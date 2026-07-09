@@ -1139,7 +1139,7 @@ requires-dist = [
     { name = "python-arango", marker = "extra == 'arango'", specifier = ">=8.0" },
     { name = "scikit-learn", marker = "extra == 'evaluate'", specifier = ">=1.3" },
     { name = "torch", marker = "extra == 'replay'", specifier = ">=2.2", index = "https://download.pytorch.org/whl/cpu" },
-    { name = "transformers", marker = "extra == 'replay'", specifier = ">=4.44" },
+    { name = "transformers", marker = "extra == 'replay'", specifier = ">=4.56" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'web'", specifier = ">=0.30" },
 ]
 provides-extras = ["pgvector", "arango", "web", "mcp", "introspect", "replay", "evaluate"]

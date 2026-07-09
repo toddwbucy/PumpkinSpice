@@ -66,6 +66,17 @@ class OpenAICompatDecoder:
         # Token counts from the most recent complete() (prompt_tokens, completion_tokens).
         self.last_usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
         self._defaults = {**self.GREEDY, **config.get("sampler", {})}
+        # Request-body passthrough for backend-specific fields (merged into the chat
+        # payload). `enable_thinking` is the v2 reasoning-location IV: set False to disable
+        # a Qwen3-style model's internal CoT via vLLM's chat_template_kwargs, so reasoning
+        # is externalized into bounded harness steps (pair with a small max_tokens). Left
+        # unset -> the model's default (internal-CoT baseline arm).
+        self.extra_body: dict[str, Any] = dict(config.get("extra_body", {}))
+        enable_thinking = config.get("enable_thinking")
+        if enable_thinking is not None:
+            ctk = dict(self.extra_body.get("chat_template_kwargs", {}))
+            ctk.setdefault("enable_thinking", bool(enable_thinking))
+            self.extra_body["chat_template_kwargs"] = ctk
         # Retry transient connection failures (the server host may briefly blip).
         transport = httpx.HTTPTransport(retries=int(config.get("retries", 2)))
         self._client = httpx.Client(
@@ -83,6 +94,7 @@ class OpenAICompatDecoder:
         payload: dict[str, Any] = {
             "messages": [{"role": "user", "content": prompt}],
             **s,
+            **self.extra_body,
         }
         if self.max_tokens > 0:
             payload["max_tokens"] = self.max_tokens
