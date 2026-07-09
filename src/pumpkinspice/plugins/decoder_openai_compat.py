@@ -21,9 +21,12 @@ these attributes conforms with no extra boilerplate.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, ClassVar
 
 import httpx
+
+log = logging.getLogger(__name__)
 
 
 class OpenAICompatDecoder:
@@ -33,6 +36,10 @@ class OpenAICompatDecoder:
     DEFAULT_BASE_URL: ClassVar[str] = "http://127.0.0.1:8000"
     GREEDY: ClassVar[dict[str, Any]] = {"temperature": 0, "top_p": 1, "seed": 0}
     require_model: ClassVar[bool] = False
+    # Whether this backend honors vLLM-style chat_template_kwargs (the transport for the
+    # `enable_thinking` no-think flag). LMStudio silently ignores it, so setting
+    # enable_thinking there would keep internal CoT on while the config says off.
+    supports_chat_template_kwargs: ClassVar[bool] = False
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}
@@ -66,6 +73,28 @@ class OpenAICompatDecoder:
         # Token counts from the most recent complete() (prompt_tokens, completion_tokens).
         self.last_usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
         self._defaults = {**self.GREEDY, **config.get("sampler", {})}
+        # Request-body passthrough for backend-specific fields (merged into the chat
+        # payload). `enable_thinking` is the v2 reasoning-location IV: set False to disable
+        # a Qwen3-style model's internal CoT via vLLM's chat_template_kwargs, so reasoning
+        # is externalized into bounded harness steps (pair with a small max_tokens). Left
+        # unset -> the model's default (internal-CoT baseline arm).
+        self.extra_body: dict[str, Any] = dict(config.get("extra_body", {}))
+        enable_thinking = config.get("enable_thinking")
+        if enable_thinking is not None:
+            # The dedicated knob WINS over any chat_template_kwargs.enable_thinking already
+            # in extra_body (a plain assign, not setdefault -- else a stray baseline value
+            # could silently invert the IV).
+            ctk = dict(self.extra_body.get("chat_template_kwargs", {}))
+            ctk["enable_thinking"] = bool(enable_thinking)
+            self.extra_body["chat_template_kwargs"] = ctk
+            if not self.supports_chat_template_kwargs:
+                log.warning(
+                    "%s decoder: enable_thinking=%s is sent via chat_template_kwargs, which "
+                    "this backend is not known to honor -- it may silently keep internal CoT "
+                    "ON. Verify the reasoning field of the captures.",
+                    self.name,
+                    enable_thinking,
+                )
         # Retry transient connection failures (the server host may briefly blip).
         transport = httpx.HTTPTransport(retries=int(config.get("retries", 2)))
         self._client = httpx.Client(
@@ -80,7 +109,13 @@ class OpenAICompatDecoder:
         self.last_reasoning = ""
         self.last_usage = {"prompt_tokens": 0, "completion_tokens": 0}
         s = {**self._defaults, **(sampler or {})}
+        # extra_body FIRST so reserved fields win over it: the greedy/parity sampler (`s`,
+        # incl. the per-call sampler=), messages, max_tokens, and model must not be
+        # clobbered by a stray extra_body key (e.g. a temperature in extra_body must not
+        # override the decode-parity sampler). extra_body then only supplies non-reserved
+        # backend fields (chat_template_kwargs, guided_choice, ...).
         payload: dict[str, Any] = {
+            **self.extra_body,
             "messages": [{"role": "user", "content": prompt}],
             **s,
         }

@@ -31,7 +31,7 @@ jobs:
         # src/ must be installed here (mcp is lazy-imported by web/mcp_host.py).
         # `replay` pulls torch/transformers, `evaluate` pulls scikit-learn, so
         # the replay smoke test and the evaluator tests both run.
-        run: uv sync --extra pgvector --extra arango --extra web --extra mcp --extra introspect --extra replay --extra evaluate
+        run: uv sync --locked --extra pgvector --extra arango --extra web --extra mcp --extra introspect --extra replay --extra evaluate
 
       - name: Format check
         run: uv run ruff format --check .

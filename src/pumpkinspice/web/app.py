@@ -280,6 +280,17 @@ Actions and their args:
 # builder already supports (see prompt_default/_plan/_replan/_executor) lets
 # Hanoi reuse all four strategies unmodified -- only the domain text differs.
 HANOI_SYSTEMS: dict[str, str] = {
+    "react": f"""\
+You are a capable agent solving the Tower of Hanoi.
+
+{HANOI_GRAMMAR}
+
+Reason EXTERNALLY and BRIEFLY -- a few short lines, not extended analysis. Each turn:
+Thought: one or two sentences choosing the single best LEGAL move (do not repeat a move
+  that just failed for the same reason).
+Action: output exactly ONE action as a JSON object on its own line, then STOP:
+  {{"action": "move", "args": {{"from": "<peg>", "to": "<peg>"}}}}
+""",
     "default": f"""\
 You are a capable agent solving the Tower of Hanoi.
 

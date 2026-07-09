@@ -88,6 +88,7 @@ default = "pumpkinspice.plugins.prompt_default:DefaultPromptBuilder"
 plan = "pumpkinspice.plugins.prompt_plan:PlanningPromptBuilder"
 replan = "pumpkinspice.plugins.prompt_replan:ReplanPromptBuilder"
 executor = "pumpkinspice.plugins.prompt_executor:ExecutorPromptBuilder"
+react = "pumpkinspice.plugins.prompt_react:ReactPromptBuilder"
 
 [project.entry-points."pumpkinspice.capture"]
 jsonl = "pumpkinspice.plugins.capture_jsonl:JsonlCapture"

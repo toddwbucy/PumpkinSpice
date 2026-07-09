@@ -47,3 +47,5 @@ class VLLMDecoder(OpenAICompatDecoder):
     DEFAULT_BASE_URL: ClassVar[str] = DEFAULT_BASE_URL
     GREEDY: ClassVar[dict[str, Any]] = GREEDY
     require_model: ClassVar[bool] = True
+    # vLLM applies chat_template_kwargs (the transport for the enable_thinking no-think IV).
+    supports_chat_template_kwargs: ClassVar[bool] = True
