@@ -184,6 +184,12 @@ class AgentLoop:
         result = self.world.act(action)
         t["world_act"] = (time.perf_counter() - t0) * 1e3
 
+        # Decode provenance (the experiment's IV record): the request the decoder actually
+        # sent this turn (effective sampler incl. seed, max_tokens, model, extra_body such as
+        # the enable_thinking no-think flag), minus the prompt. Read from the decoder's
+        # snapshot so the record matches the wire; duck-typed so decoders that do not expose
+        # it (mock/echo) record empty.
+        decode = dict(getattr(self.decoder, "last_request", {}))
         turn = Turn(
             index=index,
             task=self.task,
@@ -213,6 +219,7 @@ class AgentLoop:
             plan=plan,
             prompt_tokens=int(usage.get("prompt_tokens", 0)),
             completion_tokens=int(usage.get("completion_tokens", 0)),
+            decode=decode,
         )
         self.capture.record(turn)
         self._turns.append(turn)

@@ -91,6 +91,14 @@ class Turn:
     # tok/s is derivable as completion_tokens / (timings_ms["decode"] / 1000).
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # Decode provenance: the request the decoder ACTUALLY sent this turn, minus the prompt
+    # messages -- the effective sampler (incl. seed), max_tokens, model, and any extra_body,
+    # exactly as merged onto the wire (so the record cannot disagree with what was sent).
+    # This is the experiment's IV record -- e.g. the reasoning-location arm is
+    # decode["chat_template_kwargs"]["enable_thinking"] and the length-cap is
+    # decode["max_tokens"] -- so runs are groupable by their decode settings post-hoc (empty
+    # if the decoder does not expose `last_request`, e.g. the mock/echo decoders).
+    decode: dict[str, Any] = field(default_factory=dict)
 
 
 # --- Plugin Protocols -------------------------------------------------------
@@ -99,7 +107,14 @@ class Turn:
 @runtime_checkable
 class Decoder(Protocol):
     """LMStudio-style text decoder. Greedy/sampler settings come from config so
-    the decoder-parity gate (spec section 4) can pin them exactly."""
+    the decoder-parity gate (spec section 4) can pin them exactly.
+
+    The loop also reads these OPTIONAL provenance attributes if present (duck-typed via
+    getattr, so a bare Protocol implementation is fine but records less): ``last_request``
+    (the request body sent by the last complete(), minus messages -> Turn.decode),
+    ``last_reasoning`` (chain-of-thought), ``last_usage`` (prompt/completion token counts),
+    and ``model`` (the model id). A decoder that wants full capture provenance should set
+    ``last_request`` in complete()."""
 
     name: str
 

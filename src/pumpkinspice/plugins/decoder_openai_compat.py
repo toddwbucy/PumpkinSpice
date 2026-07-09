@@ -72,6 +72,11 @@ class OpenAICompatDecoder:
         self.last_reasoning: str = ""
         # Token counts from the most recent complete() (prompt_tokens, completion_tokens).
         self.last_usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
+        # The ACTUAL request body sent by the most recent complete(), minus the prompt
+        # messages: the effective sampler (incl. seed), max_tokens, model, and any extra_body
+        # exactly as merged onto the wire. The loop records this as the capture's decode
+        # provenance (the experiment's IV) so the record cannot disagree with what was sent.
+        self.last_request: dict[str, Any] = {}
         self._defaults = {**self.GREEDY, **config.get("sampler", {})}
         # Request-body passthrough for backend-specific fields (merged into the chat
         # payload). `enable_thinking` is the v2 reasoning-location IV: set False to disable
@@ -108,6 +113,7 @@ class OpenAICompatDecoder:
         # would double-count its tokens and mis-attribute its chain-of-thought).
         self.last_reasoning = ""
         self.last_usage = {"prompt_tokens": 0, "completion_tokens": 0}
+        self.last_request = {}
         s = {**self._defaults, **(sampler or {})}
         # extra_body FIRST so reserved fields win over it: the greedy/parity sampler (`s`,
         # incl. the per-call sampler=), messages, max_tokens, and model must not be
@@ -123,6 +129,11 @@ class OpenAICompatDecoder:
             payload["max_tokens"] = self.max_tokens
         if self.model:
             payload["model"] = self.model
+        # Snapshot the request AS SENT (minus the prompt) for capture provenance: reserved
+        # keys that clobbered extra_body are reflected as they went on the wire, and
+        # max_tokens/model are included. Set before the POST so a raising request still
+        # records what was attempted.
+        self.last_request = {k: v for k, v in payload.items() if k != "messages"}
         resp = self._client.post("/v1/chat/completions", json=payload)
         resp.raise_for_status()
         body = resp.json()
