@@ -101,6 +101,13 @@ class OpenAICompatDecoder:
             base_url=self.base_url, timeout=self.timeout, transport=transport
         )
 
+    @property
+    def default_sampler(self) -> dict[str, Any]:
+        """The decoder's baseline sampler (GREEDY + config `sampler`), before any per-call
+        override. The loop records this (merged with its per-call sampler) as decode
+        provenance so a run's seed/sampler is recoverable from the capture."""
+        return dict(self._defaults)
+
     def complete(self, prompt: str, *, sampler: dict[str, Any] | None = None) -> str:
         # Clear per-call state up front: if the request raises (e.g. a 400 when the
         # prompt exceeds a small-context model's window), the caller must see cleared

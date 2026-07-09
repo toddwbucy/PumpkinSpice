@@ -91,6 +91,12 @@ class Turn:
     # tok/s is derivable as completion_tokens / (timings_ms["decode"] / 1000).
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # Decode provenance: the effective sampler (incl. seed) and extra_body actually sent
+    # this turn. This is the experiment's IV record -- e.g. the reasoning-location arm is
+    # decode["extra_body"]["chat_template_kwargs"]["enable_thinking"] -- so runs are
+    # groupable by their sampler/no-think settings post-hoc (empty if the decoder does not
+    # expose them, e.g. the mock/echo decoders).
+    decode: dict[str, Any] = field(default_factory=dict)
 
 
 # --- Plugin Protocols -------------------------------------------------------

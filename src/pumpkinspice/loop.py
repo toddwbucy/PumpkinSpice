@@ -184,6 +184,14 @@ class AgentLoop:
         result = self.world.act(action)
         t["world_act"] = (time.perf_counter() - t0) * 1e3
 
+        # Decode provenance (the experiment's IV record): the effective sampler actually
+        # sent this turn = the decoder's baseline merged with the loop's per-call sampler,
+        # plus any extra_body (carries the enable_thinking no-think flag). Duck-typed so
+        # decoders that do not expose these (mock/echo) record empty.
+        decode = {
+            "sampler": {**getattr(self.decoder, "default_sampler", {}), **self.sampler},
+            "extra_body": dict(getattr(self.decoder, "extra_body", {})),
+        }
         turn = Turn(
             index=index,
             task=self.task,
@@ -213,6 +221,7 @@ class AgentLoop:
             plan=plan,
             prompt_tokens=int(usage.get("prompt_tokens", 0)),
             completion_tokens=int(usage.get("completion_tokens", 0)),
+            decode=decode,
         )
         self.capture.record(turn)
         self._turns.append(turn)
