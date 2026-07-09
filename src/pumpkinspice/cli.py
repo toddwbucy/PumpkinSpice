@@ -16,6 +16,7 @@ pumpkinspice serve                        run the web frontend API + SPA
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import tomllib
@@ -400,6 +401,75 @@ def _cmd_sweep(args: argparse.Namespace) -> int:  # pragma: no cover - runs real
     return 0
 
 
+def _v2_episode_config(
+    base_path: str, task: Any, seed: int, out_dir: Path
+) -> tuple[RunConfig, Path]:
+    """Build the per-episode RunConfig for the v2 runner from a base config: the ladder task
+    string + goal_monster (so the config cannot drift from the ladder), a distinct decode
+    seed (recorded in the capture as the IV), and a per-episode capture path. Pure (only
+    load_config IO) so the seed/task/path wiring is testable without a live model."""
+    cfg = load_config(base_path)
+    cfg.run["task"] = task.task
+    if task.goal_monster:
+        cfg.run["goal_monster"] = task.goal_monster
+    cfg.slots.setdefault("decoder", {}).setdefault("sampler", {})["seed"] = seed
+    path = out_dir / f"{task.name}__ep{seed:03d}.jsonl"
+    cfg.slots.setdefault("capture", {})["path"] = str(path)
+    return cfg, path
+
+
+def _reset_herobench_character(cfg: RunConfig) -> None:  # pragma: no cover - live HeroBench IO
+    """Delete + recreate the HeroBench character so each episode starts from a fresh L1
+    baseline (outcome variation then comes from the model's stochastic decisions, not a
+    drifting character state). Best-effort: a reset failure is logged, not fatal."""
+    world = cfg.slots.get("world", {})
+    base = str(world.get("base_url", "http://127.0.0.1:8000")).rstrip("/")
+    name = str(world.get("character", "hero"))
+    try:
+        with httpx.Client(base_url=base, timeout=30.0) as c:
+            skin = "men2"
+            with contextlib.suppress(Exception):  # keep the char's skin if readable, else default
+                skin = str(c.get(f"/characters/{name}").json().get("skin") or skin)
+            # delete is POST /characters/delete with the bare name (a single Body param),
+            # then recreate fresh -> L1, xp 0, spawn (0,0), full HP.
+            c.post("/characters/delete", json=name)
+            c.post("/characters/create", json={"name": name, "skin": skin})
+    except Exception as exc:
+        log.warning(
+            "character reset failed for %s (%s); episode starts from current state", name, exc
+        )
+
+
+def _cmd_v2run(args: argparse.Namespace) -> int:  # pragma: no cover - runs real model plays
+    """Stochastic per-episode runner for the v2 floor test: run N episodes of a ladder tier
+    (or `all`), each with a distinct decode seed (temperature > 0 -> per-episode outcome
+    variation near the frontier), capturing each episode separately. Optionally resets the
+    character between episodes so they are IID from a fresh baseline."""
+    from .introspect import bench_herobench as bh
+
+    tiers = list(bh.V2_LADDER) if args.tier == "all" else [args.tier]
+    unknown = [t for t in tiers if t not in bh.TASKS]
+    if unknown:
+        log.error("unknown --tier %s; choices: %s, all", unknown, ", ".join(bh.TASKS))
+        return 2
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for tier in tiers:
+        task = bh.TASKS[tier]
+        for ep in range(args.episodes):
+            seed = args.seed_base + ep
+            cfg, path = _v2_episode_config(args.config, task, seed, out_dir)
+            if not args.no_reset:
+                _reset_herobench_character(cfg)
+            log.info("v2run: tier=%s ep=%d seed=%d -> %s", tier, ep, seed, path)
+            turns = _build_loop(cfg).play(cfg.max_turns)
+            log.info("  tier=%s ep=%d: %d turns", tier, ep, len(turns))
+            n += 1
+    log.info("v2run: wrote %d episode captures to %s", n, out_dir)
+    return 0
+
+
 def _load_env_local(env_file: Path | None = None) -> None:
     """Load scoped DB credentials from the repo's .env.local into the environment,
     so `serve` can build retrieval plugins without the operator sourcing it first.
@@ -577,6 +647,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--goal-state-key", help="success = state[key] is truthy (e.g. 'solved' for Hanoi)"
     )
     sweepp.set_defaults(func=_cmd_sweep)
+
+    v2runp = sub.add_parser(
+        "v2run", help="stochastic per-episode v2 runner (N seeded episodes per ladder tier)"
+    )
+    v2runp.add_argument(
+        "--config", required=True, help="base config (decoder/retrieval/world, prompt=react)"
+    )
+    v2runp.add_argument(
+        "--tier", required=True, help="a V2_LADDER/RAMP tier name, or 'all' for every v2 tier"
+    )
+    v2runp.add_argument(
+        "--episodes", type=int, default=20, help="episodes per tier (each a distinct seed)"
+    )
+    v2runp.add_argument(
+        "--seed-base", type=int, default=0, help="first seed; episode k uses seed_base + k"
+    )
+    v2runp.add_argument("--out-dir", default="captures/v2", help="dir for per-episode captures")
+    v2runp.add_argument(
+        "--no-reset",
+        action="store_true",
+        help="do NOT delete+recreate the character between episodes (episodes share state)",
+    )
+    v2runp.set_defaults(func=_cmd_v2run)
 
     servep = sub.add_parser("serve", help="run the web frontend API (needs the 'web' extra)")
     servep.add_argument("--host", default="127.0.0.1")

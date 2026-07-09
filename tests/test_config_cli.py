@@ -113,3 +113,22 @@ def test_cli_analyze(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None
     out = capsys.readouterr().out
     assert rc == 0
     assert "m1" in out and "steps" in out
+
+
+def test_v2_episode_config(tmp_path: Path) -> None:
+    pytest.importorskip("numpy")  # bench_herobench -> introspect/__init__ -> geometry (numpy)
+    from pumpkinspice.cli import _v2_episode_config
+    from pumpkinspice.introspect.bench_herobench import V2_LADDER
+
+    task = V2_LADDER["v2_yellow_slime"]
+    cfg, path = _v2_episode_config(
+        "configs/v2_smoke_chicken_qwen3_8b.toml", task, seed=7, out_dir=tmp_path
+    )
+    # the ladder task + goal overwrite the base config; per-episode seed + capture path set
+    assert cfg.run["task"] == task.task
+    assert cfg.run["goal_monster"] == "yellow_slime"
+    assert cfg.slots["decoder"]["sampler"]["seed"] == 7
+    assert path == tmp_path / "v2_yellow_slime__ep007.jsonl"
+    assert cfg.slots["capture"]["path"] == str(path)
+    # the base config's slot selections are preserved (still the externalized react arm)
+    assert cfg.run["prompt"] == "react"
