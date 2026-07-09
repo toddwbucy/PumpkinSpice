@@ -264,3 +264,50 @@ def test_rho_summary_reports_both_ranges() -> None:
     assert rc is not None
     assert rc.block_range == pytest.approx(0.9)
     assert rc.mlp_range == pytest.approx(0.0)  # rho_mlp is all zeros in the fixture
+
+
+def test_grouped_cv_deconfounds_task_identity() -> None:
+    # feature = one-hot TASK id (pure task identity, no generalizable difficulty signal);
+    # label = the task's difficulty class. Ungrouped CV memorizes each task's one-hot dim and
+    # predicts the label; grouped CV holds out whole tasks, whose dims were never trained on,
+    # so it collapses toward chance -- exactly the Confound-A deconfound the difficulty kill needs.
+    from pumpkinspice.introspect.evaluate import _cv_probe_auc
+
+    tasks = ["easyA", "easyB", "hardC", "hardD"]
+    task_label = {"easyA": 0, "easyB": 0, "hardC": 1, "hardD": 1}
+    x_rows, y_rows, groups = [], [], []
+    for i, task in enumerate(tasks):
+        for _ in range(8):
+            onehot = [0.0, 0.0, 0.0, 0.0]
+            onehot[i] = 1.0
+            x_rows.append(onehot)
+            y_rows.append(task_label[task])
+            groups.append(task)
+    x = np.array(x_rows)
+    y = np.array(y_rows)
+    ungrouped = _cv_probe_auc(x, y, seed=0)
+    grouped = _cv_probe_auc(x, y, seed=0, groups=groups)
+    assert ungrouped is not None and ungrouped > 0.9  # memorizes task identity
+    assert grouped is not None and grouped < 0.7  # cannot generalize to held-out tasks
+
+
+def test_group_roundtrips_and_is_backward_compatible() -> None:
+    from pumpkinspice.introspect.evaluate import labeled_turn_from_dict, labeled_turn_to_dict
+
+    lt = LabeledTurn("planning", True, False, _metrics(mean_speed=1.0), group="v2_chicken")
+    assert labeled_turn_from_dict(labeled_turn_to_dict(lt)).group == "v2_chicken"
+    # a pre-grouped-CV metrics row (no "group" key) loads as ungrouped ""
+    d = labeled_turn_to_dict(lt)
+    del d["group"]
+    assert labeled_turn_from_dict(d).group == ""
+
+
+def test_report_counts_distinct_task_groups() -> None:
+    turns = [
+        LabeledTurn("planning", i % 2 == 0, "cow" in g, _metrics(mean_speed=float(i)), group=g)
+        for g in ("v2_chicken", "v2_yellow_slime", "v2_cow")
+        for i in range(4)
+    ]
+    report = evaluate_floor_test(turns)
+    assert report.n_by_type["planning"] == 12  # episode count
+    assert report.n_groups_by_type["planning"] == 3  # effective kill-#1 units (distinct tasks)

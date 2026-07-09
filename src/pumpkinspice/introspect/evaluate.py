@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -77,6 +78,11 @@ class LabeledTurn:
     correct: bool  # independent outcome label (kill #2/#3)
     hard: bool  # independent difficulty label; True=hard (kill #1)
     metrics: TrajectoryMetrics
+    # Grouping key for grouped cross-validation (Confound A): the TASK this episode belongs
+    # to (e.g. "v2_yellow_slime"). The difficulty probe (kill #1) groups by this so no task's
+    # trajectories leak across CV folds -- the probe must find a difficulty signature that
+    # GENERALIZES to held-out tasks, not memorize one. "" = ungrouped (falls back to plain CV).
+    group: str = ""
 
 
 def kinematic_features(m: TrajectoryMetrics) -> Array:
@@ -105,26 +111,54 @@ def drho_features(m: TrajectoryMetrics) -> Array:
 
 
 def _cv_probe_auc(
-    features: Array, labels: NDArray[np.int_], *, folds: int = 5, seed: int = 0, c: float = 1.0
+    features: Array,
+    labels: NDArray[np.int_],
+    *,
+    folds: int = 5,
+    seed: int = 0,
+    c: float = 1.0,
+    groups: Sequence[str] | None = None,
 ) -> float | None:
     """Pooled out-of-fold cross-validated AUC of an L2 logistic probe.
 
-    Returns None when the AUC is undefined: only one class present, or too few
-    per-class samples to make >= 2 stratified folds.
+    When ``groups`` has >= 2 distinct values, folds are GROUPED (StratifiedGroupKFold): no
+    group's samples straddle train/test, so the probe cannot memorize a task and must
+    generalize to held-out groups (the Confound-A deconfound for the difficulty kill). The
+    fold count is then bounded by the minority class's distinct-group count, not its sample
+    count. Otherwise plain stratified CV.
+
+    Returns None when the AUC is undefined: one class only, or too few per-class units for
+    >= 2 folds.
     """
     from sklearn.linear_model import LogisticRegression
-    from sklearn.model_selection import StratifiedKFold
     from sklearn.preprocessing import StandardScaler
 
     y = np.asarray(labels, dtype=int)
     if np.unique(y).size < 2:
         return None
-    n_splits = min(folds, int(np.bincount(y).min()))
-    if n_splits < 2:
-        return None
-    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+
+    g = np.asarray(groups) if groups is not None else None
+    if g is not None and np.unique(g).size >= 2:
+        from sklearn.model_selection import StratifiedGroupKFold
+
+        # each fold needs >= 1 group per class -> bound folds by the min per-class GROUP count
+        per_class_groups = min(np.unique(g[y == cls]).size for cls in np.unique(y))
+        n_splits = min(folds, per_class_groups)
+        if n_splits < 2:
+            return None
+        splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+        split = splitter.split(features, y, groups=g)
+    else:
+        from sklearn.model_selection import StratifiedKFold
+
+        n_splits = min(folds, int(np.bincount(y).min()))
+        if n_splits < 2:
+            return None
+        splitter = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+        split = splitter.split(features, y)
+
     oof = np.full(y.shape[0], np.nan, dtype=np.float64)
-    for train_idx, test_idx in skf.split(features, y):
+    for train_idx, test_idx in split:
         scaler = StandardScaler().fit(features[train_idx])
         clf = LogisticRegression(C=c, max_iter=1000).fit(
             scaler.transform(features[train_idx]), y[train_idx]
@@ -249,6 +283,10 @@ class LengthControl:
 @dataclass(frozen=True)
 class FloorTestReport:
     n_by_type: dict[str, int]
+    # Effective independent-unit count for the DIFFICULTY probe: distinct task-groups per
+    # task_type (kill #1 generalizes across these, so this -- not the episode count -- is the
+    # number that bounds its reliability). 1 means ungrouped/single-task (kill #1 undefined).
+    n_groups_by_type: dict[str, int]
     n_layers: int | None
     # #7 diagnostics
     drho_hard_easy: dict[str, float | None]  # task_type -> probe AUC over d_rho features
@@ -269,6 +307,10 @@ class FloorTestReport:
     def summary(self) -> str:
         lines = ["Floor-test report (issues #7, #8)", "=" * 40]
         lines.append("N by task type: " + ", ".join(f"{k}={v}" for k, v in self.n_by_type.items()))
+        lines.append(
+            "distinct task-groups (kill #1 units): "
+            + ", ".join(f"{k}={v}" for k, v in self.n_groups_by_type.items())
+        )
         lines.append(f"layers: {self.n_layers}")
         lines.append("")
         lines.append("#7 kill conditions:")
@@ -364,6 +406,7 @@ def evaluate_floor_test(
     _validate_corpus(turns)
     grouped = _by_type(turns)
     n_by_type = {ty: len(v) for ty, v in grouped.items()}
+    n_groups_by_type = {ty: len({t.group for t in v}) for ty, v in grouped.items()}
     thresholds = sorted(turns[0].metrics.d_rho)
 
     drho_probe: dict[str, float | None] = {}
@@ -375,29 +418,36 @@ def evaluate_floor_test(
         correct = [t.correct for t in group]
         yh = np.asarray(hard, dtype=int)
         yc = np.asarray(correct, dtype=int)
+        # DIFFICULTY (kill #1) groups by TASK so no task leaks across folds (Confound A);
+        # CORRECTNESS (kill #2) is per-episode, so each episode is its own unit (plain CV).
+        task_groups = [t.group for t in group]
         # generation length the trajectory spanned (span-aware), as a 1-column feature
         lengths = [_length_of(t.metrics) for t in group]
         length_x = np.array([[x] for x in lengths])
         drho_x = np.array([drho_features(t.metrics) for t in group])
-        drho_probe[ty] = _cv_probe_auc(drho_x, yh, seed=seed)
+        drho_probe[ty] = _cv_probe_auc(drho_x, yh, seed=seed, groups=task_groups)
         drho_pt[ty] = {
             rho: _single_feature_auc([float(t.metrics.d_rho[rho]) for t in group], hard)
             for rho in thresholds
         }
         kin_x = np.array([kinematic_features(t.metrics) for t in group])
         kin_probe[ty] = _cv_probe_auc(kin_x, yc, seed=seed)
-        # Does the geometry beat length? Same shape for both kinds (one place, so a
-        # future edit can't silently swap the labels/features of one copy). Length uses
-        # the deterministic single-feature AUC (a CV probe on one column deflates it).
+        # Does the geometry beat length? Same shape for both kinds (one place, so a future
+        # edit can't silently swap the labels/features of one copy). The combined probe uses
+        # the SAME grouping as its geometry probe -- grouped by task for difficulty, plain for
+        # correctness -- so length cannot smuggle task identity past the deconfound. Length
+        # uses the deterministic single-feature AUC (a CV probe on one column deflates it).
         length_control[ty] = {
             kind: LengthControl(
                 geometry_auc=geom,
                 length_auc=_length_auc(lengths, labels),
-                combined_auc=_cv_probe_auc(np.hstack([feat_x, length_x]), yarr, seed=seed),
+                combined_auc=_cv_probe_auc(
+                    np.hstack([feat_x, length_x]), yarr, seed=seed, groups=grp
+                ),
             )
-            for kind, feat_x, labels, yarr, geom in (
-                ("correctness", kin_x, correct, yc, kin_probe[ty]),
-                ("difficulty", drho_x, hard, yh, drho_probe[ty]),
+            for kind, feat_x, labels, yarr, geom, grp in (
+                ("correctness", kin_x, correct, yc, kin_probe[ty], None),
+                ("difficulty", drho_x, hard, yh, drho_probe[ty], task_groups),
             )
         }
 
@@ -425,6 +475,7 @@ def evaluate_floor_test(
 
     return FloorTestReport(
         n_by_type=n_by_type,
+        n_groups_by_type=n_groups_by_type,
         n_layers=n_layers,
         drho_hard_easy=drho_probe,
         drho_per_threshold=drho_pt,
@@ -548,6 +599,7 @@ def labeled_turn_to_dict(t: LabeledTurn) -> dict[str, Any]:
         "task_type": t.task_type,
         "correct": t.correct,
         "hard": t.hard,
+        "group": t.group,
         "metrics": metrics_to_dict(t.metrics),
     }
 
@@ -558,6 +610,7 @@ def labeled_turn_from_dict(d: dict[str, Any]) -> LabeledTurn:
         correct=bool(d["correct"]),
         hard=bool(d["hard"]),
         metrics=metrics_from_dict(d["metrics"]),
+        group=str(d.get("group", "")),  # absent in pre-grouped-CV metric files -> ungrouped
     )
 
 
@@ -574,6 +627,7 @@ def load_labeled_turns(path: str | Path) -> list[LabeledTurn]:
 def report_to_dict(r: FloorTestReport) -> dict[str, Any]:
     return {
         "n_by_type": r.n_by_type,
+        "n_groups_by_type": r.n_groups_by_type,
         "n_layers": r.n_layers,
         "drho_hard_easy": r.drho_hard_easy,
         "drho_per_threshold": {
