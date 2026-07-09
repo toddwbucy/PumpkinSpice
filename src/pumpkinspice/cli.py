@@ -74,6 +74,7 @@ def _build_loop(cfg: RunConfig) -> AgentLoop:
         goal_level=cfg.run.get("goal_level"),
         goal_skill=cfg.run.get("goal_skill"),
         goal_state_key=cfg.run.get("goal_state_key"),
+        goal_monster=cfg.run.get("goal_monster"),
     )
 
 
@@ -176,6 +177,7 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
             goal_level=args.goal_level,
             goal_skill=args.goal_skill,
             goal_state_key=args.goal_state_key,
+            goal_monster=args.goal_monster,
         )
         for p in paths
     ]
@@ -256,13 +258,15 @@ def _cmd_replay_metrics(args: argparse.Namespace) -> int:  # pragma: no cover - 
     if args.herobench_tier:
         from .introspect import bench_herobench as bh
 
-        if args.herobench_tier not in bh.RAMP:
+        if args.herobench_tier not in bh.TASKS:
             log.error(
-                "unknown --herobench-tier %r; choices: %s", args.herobench_tier, ", ".join(bh.RAMP)
+                "unknown --herobench-tier %r; choices: %s",
+                args.herobench_tier,
+                ", ".join(bh.TASKS),
             )
             return 2
         rows = [json.loads(ln) for ln in Path(args.captures).read_text().splitlines() if ln.strip()]
-        label_fn = bh.make_label_fn(rows, bh.RAMP[args.herobench_tier])
+        label_fn = bh.make_label_fn(rows, bh.TASKS[args.herobench_tier])
 
     # Resolve dtype: bf16 fits long traces on a 48GB card, but a GGUF replay wants fp32
     # -- the GGUF loader dequantizes to fp32, so bf16 would double-round the weights and
@@ -306,7 +310,9 @@ def _cmd_reports_import(args: argparse.Namespace) -> int:  # pragma: no cover - 
         turns = [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
         if not turns:
             continue
-        m = analyze.analyze_turns(p.stem, turns, goal_item=args.goal_item)
+        m = analyze.analyze_turns(
+            p.stem, turns, goal_item=args.goal_item, goal_monster=args.goal_monster
+        )
         stem = p.stem
         strategy = "replan" if "replan" in stem else "plan" if "plan" in stem else "default"
         reg.record(
@@ -385,6 +391,7 @@ def _cmd_sweep(args: argparse.Namespace) -> int:  # pragma: no cover - runs real
                     goal_level=args.goal_level,
                     goal_skill=args.goal_skill,
                     goal_state_key=args.goal_state_key,
+                    goal_monster=args.goal_monster,
                 )
                 for p in captures
             ]
@@ -477,6 +484,9 @@ def build_parser() -> argparse.ArgumentParser:
     analyzep.add_argument(
         "--goal-state-key", help="success = state[key] is truthy (e.g. 'solved' for Hanoi)"
     )
+    analyzep.add_argument(
+        "--goal-monster", help="success = won a fight vs this monster code (v2 capability goal)"
+    )
     analyzep.add_argument("--json", help="also write the metrics as JSON to this path")
     analyzep.set_defaults(func=_cmd_analyze)
 
@@ -540,6 +550,9 @@ def build_parser() -> argparse.ArgumentParser:
     importp.add_argument("--db", default="captures/results.db", help="registry SQLite path")
     importp.add_argument("--benchmark", default="herobench")
     importp.add_argument("--goal-item", help="success = this item code crafted this run")
+    importp.add_argument(
+        "--goal-monster", help="success = won a fight vs this monster code (v2 capability goal)"
+    )
     importp.set_defaults(func=_cmd_reports_import)
 
     sweepp = sub.add_parser("sweep", help="run a config across models, then compare (Stage 1)")
@@ -557,6 +570,9 @@ def build_parser() -> argparse.ArgumentParser:
     sweepp.add_argument("--goal-item", help="success = this item code is in the final inventory")
     sweepp.add_argument("--goal-level", type=int, help="success = final character level >= N")
     sweepp.add_argument("--goal-skill", help="scope --goal-level to a skill (e.g. weaponcrafting)")
+    sweepp.add_argument(
+        "--goal-monster", help="success = won a fight vs this monster code (v2 capability goal)"
+    )
     sweepp.add_argument(
         "--goal-state-key", help="success = state[key] is truthy (e.g. 'solved' for Hanoi)"
     )

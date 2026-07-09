@@ -18,6 +18,7 @@ from pumpkinspice.introspect.bench_herobench import (
     MAX_TURNS,
     RAMP,
     TASK_TYPE,
+    V2_LADDER,
     eventual_correct,
     make_label_fn,
 )
@@ -35,6 +36,50 @@ def _turn(**world: Any) -> dict[str, Any]:
         "outcome": {"ok": True},
         "timings_ms": {},
     }
+
+
+def _fight_turn(result: str, monster: str) -> dict[str, Any]:
+    """A turn whose captured outcome is a HeroBench fight response (win/loss vs a monster)."""
+    t = _turn()
+    t["action"] = {"kind": "fight", "args": {}}
+    t["outcome"] = {"ok": True, "data": {"fight": {"result": result, "monster": monster}}}
+    return t
+
+
+def test_v2_ladder_integrity() -> None:
+    assert set(V2_LADDER) == {
+        "v2_chicken",
+        "v2_yellow_slime",
+        "v2_green_slime",
+        "v2_blue_slime",
+        "v2_red_slime",
+        "v2_cow",
+    }
+    # every v2 task is scored on winning a fight vs its monster (not an item/level proxy)
+    assert all(
+        t.goal_monster and t.goal_item is None and t.goal_level is None for t in V2_LADDER.values()
+    )
+    assert V2_LADDER["v2_cow"].goal_monster == "cow"
+    # easy = winnable at/near L1 (no resist, or earth-resist beaten by the L1 air dagger);
+    # hard = the air-resist / high-HP tiers that require leveling
+    assert V2_LADDER["v2_chicken"].hard is False
+    assert V2_LADDER["v2_yellow_slime"].hard is False
+    assert all(
+        V2_LADDER[n].hard for n in ("v2_green_slime", "v2_blue_slime", "v2_red_slime", "v2_cow")
+    )
+    assert all(t.task and t.name for t in V2_LADDER.values())
+
+
+def test_eventual_correct_goal_monster_scores_on_win() -> None:
+    task = V2_LADDER["v2_yellow_slime"]
+    # a win vs the objective monster -> correct (even with earlier non-fight turns)
+    assert eventual_correct([_turn(level=1), _fight_turn("win", "yellow_slime")], task) is True
+    # a LOSS vs the objective monster does not count ("lose" is HeroBench's FightResult token)
+    assert eventual_correct([_fight_turn("lose", "yellow_slime")], task) is False
+    # a WIN vs a DIFFERENT monster does not count (grades the objective monster only)
+    assert eventual_correct([_fight_turn("win", "chicken")], task) is False
+    # no fights at all -> not correct
+    assert eventual_correct([_turn(level=1)], task) is False
 
 
 def test_ramp_integrity() -> None:
@@ -97,3 +142,17 @@ def test_configs_match_ramp() -> None:
         assert cfg["run"]["task"] == task.task, f"{name}: config task drifted from RAMP"
         assert cfg["run"]["max_turns"] == MAX_TURNS
         assert "goal_item" not in cfg["run"], f"{name}: config must not stop early on a goal"
+
+
+def test_v2_smoke_config_matches_ladder() -> None:
+    # The step-4 smoke config cannot drift from the ladder, and it must be the externalized
+    # arm (react prompt + no-think decode) that v2 is built to measure.
+    import tomllib
+    from pathlib import Path
+
+    cfg = tomllib.loads(Path("configs/v2_smoke_chicken_qwen3_8b.toml").read_text())
+    task = V2_LADDER["v2_chicken"]
+    assert cfg["run"]["task"] == task.task, "smoke config task drifted from the ladder"
+    assert cfg["run"]["goal_monster"] == task.goal_monster == "chicken"
+    assert cfg["run"]["prompt"] == "react"  # externalized strategy
+    assert cfg["decoder"]["enable_thinking"] is False  # the no-think arm

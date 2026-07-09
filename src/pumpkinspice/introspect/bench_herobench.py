@@ -48,10 +48,18 @@ class RampTask:
 
     name: str
     task: str
-    hard: bool  # independent difficulty label (kill #1): requires the crafting chain?
+    # Independent difficulty label for kill #1. Its SEMANTICS are per-ladder, and RAMP vs
+    # V2_LADDER captures are SEPARATE corpora that must not be pooled on this axis: in RAMP
+    # hard = requires the crafting chain; in V2_LADDER hard = requires LEVELING to out-damage
+    # (yellow_slime needs a craft but no leveling, so it is hard=True in RAMP, hard=False in
+    # V2_LADDER -- the same monster, two different difficulty axes).
+    hard: bool
     goal_item: str | None = None
     goal_level: int | None = None
     goal_skill: str | None = None
+    # v2 capability-milestone goal: scored on WINNING a fight vs this monster (from the
+    # fight response), not a drop or a level proxy. See loop.fight_won_vs.
+    goal_monster: str | None = None
 
 
 # Difficulty rises with gear-dependency depth. easy (hard=False) = doable from the
@@ -102,15 +110,61 @@ RAMP: dict[str, RampTask] = {
 }
 
 
+def _v2_task(monster_phrase: str) -> str:
+    """A fair, ICL-free capability-milestone prompt: state the goal and point the model at
+    retrieval to plan. It does NOT name the solution steps (gather/craft/level/heal) -- that
+    is the planning the IV measures, and naming it would bias the arm and push the chicken
+    positive control into needless crafting."""
+    return (
+        f"Defeat a {monster_phrase}. You start at level 1 with a wooden stick equipped. "
+        "Use the reference notes to plan how to beat it."
+    )
+
+
+# v2 capability-milestone ladder (docs/floor-test-v2-design.md 8.1). Each task is "win a
+# fight vs monster M", scored by loop.fight_won_vs -- the WIN is authoritative, unlike the
+# ~5%-rate drop (which is why the RAMP's yellow_slime tier had to fall back to goal_level).
+# Difficulty = level-gap from a fresh L1 char x counter-element (this ladder's `hard` axis,
+# DISTINCT from RAMP's crafting-chain axis; see RampTask.hard): easy (hard=False) = winnable
+# at/near L1 (chicken has no resist; yellow_slime resists earth but the L1 copper_dagger's air
+# damage wins -- a craft, no leveling); hard (hard=True) = the air-resist and high-HP tiers
+# that require LEVELING to out-damage. The roster caps distinct monsters per difficulty class
+# (~2 easy, ~4 hard) -- the documented kill1-generalization limit.
+#
+# UNLIKE the fixed-100-turn RAMP, v2 tiers are STOP-ON-GOAL: an episode ends at the first win
+# (goal_monster in [run]), and the measured metric is the FIRST planning turn (design doc 4.2),
+# not the full trajectory -- so v2 captures are NOT budget-comparable to RAMP captures.
+V2_LADDER: dict[str, RampTask] = {
+    t.name: t
+    for t in (
+        RampTask("v2_chicken", _v2_task("chicken"), hard=False, goal_monster="chicken"),
+        RampTask(
+            "v2_yellow_slime", _v2_task("yellow slime"), hard=False, goal_monster="yellow_slime"
+        ),
+        RampTask("v2_green_slime", _v2_task("green slime"), hard=True, goal_monster="green_slime"),
+        RampTask("v2_blue_slime", _v2_task("blue slime"), hard=True, goal_monster="blue_slime"),
+        RampTask("v2_red_slime", _v2_task("red slime"), hard=True, goal_monster="red_slime"),
+        RampTask("v2_cow", _v2_task("cow"), hard=True, goal_monster="cow"),
+    )
+}
+
+# One registry so CLI tier lookups / help find both ladders (RAMP is v1, V2_LADDER is v2).
+TASKS: dict[str, RampTask] = {**RAMP, **V2_LADDER}
+
+
 def eventual_correct(turns: list[dict[str, Any]], task: RampTask) -> bool:
     """Episode-level correctness: did the run reach ``task``'s goal within its budget?
-    Reuses analyze.analyze_turns so this matches the harness's own success semantics."""
+
+    Delegates entirely to analyze.analyze_turns (the single success-semantics source, incl.
+    the v2 ``goal_monster`` won-fight arm), so this bench path and the analyze/sweep/web
+    surfaces cannot disagree."""
     metrics = analyze.analyze_turns(
         "floortest",
         turns,
         goal_item=task.goal_item,
         goal_level=task.goal_level,
         goal_skill=task.goal_skill,
+        goal_monster=task.goal_monster,
     )
     return bool(metrics.success)
 

@@ -72,6 +72,31 @@ def _item_count(state: dict[str, Any], code: str) -> int:
     return 0
 
 
+def fight_result(outcome: object) -> dict[str, Any] | None:
+    """The HeroBench fight sub-response captured in ``outcome["data"]["fight"]``, or None
+    if this turn's outcome carries no parseable fight (a non-fight action, an error, or a
+    format skew). ``outcome`` is typed ``object`` because it comes from possibly-malformed
+    or foreign JSONL captures -- the isinstance guards are load-bearing, not dead code."""
+    if not isinstance(outcome, dict):
+        return None
+    data = outcome.get("data")
+    if not isinstance(data, dict):
+        return None
+    fight = data.get("fight")
+    return fight if isinstance(fight, dict) else None
+
+
+def fight_won_vs(outcome: object, monster: str) -> bool:
+    """True if a turn's action was a fight WON against ``monster``. Reads the live HeroBench
+    fight response (``result == "win"`` and ``monster == <code>``; the enum is win/lose and
+    ``monster`` is always set -- verified against the live server and HeroBench's
+    ``FightResult``/endpoint source). The win + fought-monster are authoritative here,
+    independent of the ~5%-rate item drop, which is why the v2 capability goal scores on
+    this rather than a drop or a level proxy."""
+    fight = fight_result(outcome)
+    return fight is not None and fight.get("result") == "win" and fight.get("monster") == monster
+
+
 class AgentLoop:
     def __init__(
         self,
@@ -89,6 +114,7 @@ class AgentLoop:
         goal_level: int | None = None,
         goal_skill: str | None = None,
         goal_state_key: str | None = None,
+        goal_monster: str | None = None,
     ) -> None:
         self.decoder = decoder
         self.retrieval = retrieval
@@ -110,6 +136,12 @@ class AgentLoop:
         # own solved-ness directly, e.g. HanoiWorld's "solved" -- no item/level
         # counting needed).
         self.goal_state_key = goal_state_key
+        # goal_monster: success = the run WON a fight vs this monster code (the v2
+        # capability-milestone goal). Unlike the others this is OUTCOME-based (read from
+        # the fight response captured in a turn, not world state) -- see fight_won_vs.
+        # Normalize a falsy goal_monster ("" from a blanked TOML key) to None, so it does not
+        # take the outcome branch below and silently disable a co-set state-based goal.
+        self.goal_monster = goal_monster or None
         self._goal_baseline = 0  # count of goal_item at run start (set in play())
         # In-context working memory: the agent's own prior turns, fed back into the
         # prompt. NOT persisted, NOT written back to any store (the agent's DB role
@@ -183,6 +215,19 @@ class AgentLoop:
         t0 = time.perf_counter()
         result = self.world.act(action)
         t["world_act"] = (time.perf_counter() - t0) * 1e3
+        # Loud failure on a fight whose response has no parseable fight block: a HeroBench
+        # response-format skew would otherwise make goal_monster score every genuine win as a
+        # loss SILENTLY (full budget burned, 0% correct, no error). Surface it here.
+        if action.kind == "fight" and result.ok and fight_result({"data": result.data}) is None:
+            keys = (
+                list(result.data) if isinstance(result.data, dict) else type(result.data).__name__
+            )
+            log.warning(
+                "turn %d: fight action returned no parseable fight result (data=%s) -- "
+                "verify the HeroBench fight response shape; goal_monster scoring depends on it.",
+                index,
+                keys,
+            )
 
         # Decode provenance (the experiment's IV record): the request the decoder actually
         # sent this turn (effective sampler incl. seed, max_tokens, model, extra_body such as
@@ -226,13 +271,28 @@ class AgentLoop:
         return turn
 
     def _goal_reached(self) -> bool:
-        """Goal = the agent CRAFTED the item this run (count > the start baseline),
-        not merely that it is present -- a reset character can carry residual
-        inventory, which would otherwise read as an instant false completion. Level
-        goals are absolute (you cannot un-level). A fresh get_state is the reliable
-        post-action source (the action response nests the character per verb)."""
-        if self.goal_item is None and self.goal_level is None and self.goal_state_key is None:
+        """Has the run reached its goal? Checked after each turn (play breaks on the first
+        True). Exactly one goal_* should be set; if several are, PRECEDENCE is
+        goal_monster > goal_state_key > goal_item > goal_level (first set wins).
+
+        - goal_monster (v2, OUTCOME-based): the just-played turn WON a fight vs the target
+          monster (read from the captured fight response, not world state). Only the last
+          turn can newly satisfy it -- earlier turns were already checked and did not stop.
+        - goal_item: the agent CRAFTED the item this run (count > the start baseline), not
+          merely that it is present -- a reset character can carry residual inventory, which
+          would otherwise read as an instant false completion.
+        - goal_level / goal_skill / goal_state_key: absolute state checks (you cannot un-level;
+          a fresh get_state is the reliable post-action source)."""
+        if (
+            self.goal_item is None
+            and self.goal_level is None
+            and self.goal_state_key is None
+            and self.goal_monster is None
+        ):
             return False
+        if self.goal_monster is not None:
+            # Only the just-appended turn can newly satisfy this (O(1), not O(n) per call).
+            return bool(self._turns) and fight_won_vs(self._turns[-1].outcome, self.goal_monster)
         try:
             state = self.world.get_state().raw
         except Exception:  # never let a goal check abort an otherwise-fine run
