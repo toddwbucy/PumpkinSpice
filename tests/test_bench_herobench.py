@@ -142,3 +142,17 @@ def test_configs_match_ramp() -> None:
         assert cfg["run"]["task"] == task.task, f"{name}: config task drifted from RAMP"
         assert cfg["run"]["max_turns"] == MAX_TURNS
         assert "goal_item" not in cfg["run"], f"{name}: config must not stop early on a goal"
+
+
+def test_v2_smoke_config_matches_ladder() -> None:
+    # The step-4 smoke config cannot drift from the ladder, and it must be the externalized
+    # arm (react prompt + no-think decode) that v2 is built to measure.
+    import tomllib
+    from pathlib import Path
+
+    cfg = tomllib.loads(Path("configs/v2_smoke_chicken_qwen3_8b.toml").read_text())
+    task = V2_LADDER["v2_chicken"]
+    assert cfg["run"]["task"] == task.task, "smoke config task drifted from the ladder"
+    assert cfg["run"]["goal_monster"] == task.goal_monster == "chicken"
+    assert cfg["run"]["prompt"] == "react"  # externalized strategy
+    assert cfg["decoder"]["enable_thinking"] is False  # the no-think arm

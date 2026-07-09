@@ -1,0 +1,46 @@
+# v2 walking-skeleton smoke test (build step 4): the externalized react + no-think path on
+# the easiest capability-milestone task (defeat a chicken), against the LIVE HeroBench world
+# and pgvector retrieval. This exercises the full v2 loop end to end: react prompt -> vLLM
+# no-think decode -> parse action -> act on HeroBench -> capture (with decode provenance) ->
+# stop when the chicken is beaten (goal_monster + fight_won_vs).
+#
+# Requires up: vLLM serving Qwen3-8B on :8001 (adjust `model` to the served name), HeroBench
+# on :8000 (character_1 present), Ollama embeddings on :11434, and scoped pg creds sourced
+# from .env.local. The externalized arm needs vLLM specifically -- LMStudio silently ignores
+# chat_template_kwargs, so enable_thinking would not take effect there (the decoder warns).
+#   set -a; . .env.local; set +a
+#   uv run --extra pgvector pumpkinspice run --config configs/v2_smoke_chicken_qwen3_8b.toml
+#
+# For the real per-episode stochastic runner (step 5) the seed varies per episode; here the
+# single run uses a fixed seed, so it is stochastic-but-reproducible.
+
+[run]
+decoder      = "vllm"
+retrieval    = "pgvector"
+world        = "herobench"
+prompt       = "react"
+capture      = "jsonl"
+task         = "Defeat a chicken. You start at level 1 with a wooden stick equipped. Check the monster's level and resistances in the reference notes and plan how to beat it -- gathering, crafting a suitable weapon, leveling up, and healing as needed."
+goal_monster = "chicken"
+max_turns    = 25
+
+[decoder]
+base_url        = "http://localhost:8001"
+model           = "Qwen/Qwen3-8B"   # set to the exact vLLM-served model name
+enable_thinking = false             # externalized no-think arm (vLLM chat_template_kwargs)
+max_tokens      = 1024              # bounded external step (vLLM needs an explicit cap)
+sampler         = { temperature = 0.7 }   # stochastic (per-episode outcome variation)
+
+[retrieval]
+top_k       = 5
+dsn_env     = "PUMPKINSPICE_PG_DSN"       # scoped, read-only agent role
+table       = "kg.belief_nodes"
+embed_url   = "http://localhost:11434"
+embed_model = "nomic-embed-text"          # must match the model that seeded the corpus
+
+[world]
+base_url  = "http://127.0.0.1:8000"
+character = "character_1"
+
+[capture]
+path = "captures/v2_smoke_chicken.jsonl"
