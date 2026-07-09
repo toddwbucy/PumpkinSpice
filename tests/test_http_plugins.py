@@ -100,6 +100,10 @@ def test_enable_thinking_and_extra_body(caplog) -> None:  # type: ignore[no-unty
     assert captured["temperature"] == 0  # greedy default wins over extra_body
     assert captured["guided_choice"] == ["a"]  # non-reserved field passes through
     assert "chat_template_kwargs" not in captured  # unset enable_thinking -> not sent
+    # last_request mirrors the wire EXACTLY (minus messages): it cannot claim the clobbered
+    # extra_body temperature 0.9 -- it records the sent value 0 (capture cannot lie).
+    assert d3.last_request == {k: v for k, v in captured.items() if k != "messages"}
+    assert d3.last_request["temperature"] == 0
 
 
 def test_lmstudio_captures_reasoning() -> None:

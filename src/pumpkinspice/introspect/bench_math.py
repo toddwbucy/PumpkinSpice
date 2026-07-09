@@ -296,6 +296,9 @@ def run_math_benchmark(
             model=str(getattr(decoder, "model", "") or ""),
             prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
             completion_tokens=int(usage.get("completion_tokens", 0) or 0),
+            # Same decode provenance as the agent loop: the reasoning (MATH) arm must record
+            # its IV too, else no-think and baseline math runs are indistinguishable.
+            decode=dict(getattr(decoder, "last_request", {})),
         )
         capture.record(turn)
         turns.append(turn)
