@@ -25,10 +25,11 @@ from starlette.types import Scope
 from .. import __version__, kernel
 from ..config import RunConfig, load_config
 from ..embeddings import DEFAULT_EMBED_MODEL, DEFAULT_EMBED_URL
+from ..episode import stochastic_sampler as _stochastic_sampler
 from ..reporting import RunRegistry
 from .mcp_host import McpHost
 from .mcp_servers import McpServer, McpServerStore
-from .runs import RunManager, _stochastic_sampler
+from .runs import RunManager
 from .settings import AppSettings, SettingsStore
 
 # OpenAI-compatible backend presets. The LMStudio endpoint moves (LAN host vs

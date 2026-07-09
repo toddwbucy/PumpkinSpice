@@ -13,36 +13,20 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-import httpx
-
 from .. import analyze, kernel
 from ..config import RunConfig
 from ..contracts import Turn
+
+# reset_herobench_character/_stochastic_sampler are shared with the CLI v2 runner (v2run) --
+# one implementation, in core (pumpkinspice.episode).
+from ..episode import reset_herobench_character
+from ..episode import stochastic_sampler as _stochastic_sampler
 from ..loop import AgentLoop
 from ..reporting import RunRegistry
 
 
 def _now() -> str:
     return datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
-
-
-def reset_herobench_character(base_url: str, character: str) -> None:
-    """Reset a HeroBench character to a fresh L1 / empty-inventory baseline (pure
-    REST: delete then create). Verified 2026-06-29 that the REST delete clears the
-    inventory hash too, so no redis access is needed. Used between trials so each
-    starts from the identical line."""
-    with httpx.Client(base_url=base_url.rstrip("/"), timeout=20.0) as c:
-        # delete takes the name as a raw JSON-string body; 498 if it did not exist.
-        with contextlib.suppress(httpx.HTTPError):
-            c.post("/characters/delete", json=character)
-        c.post("/characters/create", json={"name": character, "skin": "men2"})
-
-
-def _stochastic_sampler(temperature: float, seed: int) -> dict[str, Any]:
-    """A genuinely stochastic sampler for trials. The decoder's GREEDY default pins
-    top_k=1 (which collapses to one token and makes temperature inert) and seed=0;
-    override both so trials actually diverge yet stay per-seed reproducible."""
-    return {"temperature": temperature, "top_k": 0, "top_p": 0.95, "seed": seed}
 
 
 @dataclasses.dataclass

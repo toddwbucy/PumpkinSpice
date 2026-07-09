@@ -16,7 +16,6 @@ pumpkinspice serve                        run the web frontend API + SPA
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import os
 import tomllib
@@ -27,6 +26,7 @@ import httpx
 
 from . import kernel, parity, transport
 from .config import RunConfig, load_config
+from .episode import reset_herobench_character, stochastic_sampler
 from .logging import configure_logging, get_logger
 from .loop import AgentLoop
 
@@ -402,50 +402,39 @@ def _cmd_sweep(args: argparse.Namespace) -> int:  # pragma: no cover - runs real
 
 
 def _v2_episode_config(
-    base_path: str, task: Any, seed: int, out_dir: Path
+    base_path: str, task: Any, ep: int, seed: int, out_dir: Path
 ) -> tuple[RunConfig, Path]:
-    """Build the per-episode RunConfig for the v2 runner from a base config: the ladder task
-    string + goal_monster (so the config cannot drift from the ladder), a distinct decode
-    seed (recorded in the capture as the IV), and a per-episode capture path. Pure (only
-    load_config IO) so the seed/task/path wiring is testable without a live model."""
+    """Build the per-episode RunConfig from a base config: the ladder task string, ALL of the
+    ladder task's goal fields (overwriting any stale base-config goal, so a RAMP tier gets its
+    item/level goal and a v2 tier its monster goal -- no leak), a genuinely-stochastic sampler
+    for this episode's seed (top_k un-pinned so the seed is not inert), and a per-episode
+    capture path keyed on the EPISODE INDEX (+ seed). Pure (only load_config IO), so testable
+    without a live model."""
     cfg = load_config(base_path)
     cfg.run["task"] = task.task
-    if task.goal_monster:
-        cfg.run["goal_monster"] = task.goal_monster
-    cfg.slots.setdefault("decoder", {}).setdefault("sampler", {})["seed"] = seed
-    path = out_dir / f"{task.name}__ep{seed:03d}.jsonl"
+    cfg.run["goal_item"] = task.goal_item
+    cfg.run["goal_level"] = task.goal_level
+    cfg.run["goal_skill"] = task.goal_skill
+    cfg.run["goal_monster"] = task.goal_monster
+    temperature = float(cfg.slots.get("decoder", {}).get("sampler", {}).get("temperature", 0.7))
+    cfg.slots.setdefault("decoder", {})["sampler"] = stochastic_sampler(temperature, seed)
+    path = out_dir / f"{task.name}__ep{ep:03d}_seed{seed:03d}.jsonl"
     cfg.slots.setdefault("capture", {})["path"] = str(path)
     return cfg, path
-
-
-def _reset_herobench_character(cfg: RunConfig) -> None:  # pragma: no cover - live HeroBench IO
-    """Delete + recreate the HeroBench character so each episode starts from a fresh L1
-    baseline (outcome variation then comes from the model's stochastic decisions, not a
-    drifting character state). Best-effort: a reset failure is logged, not fatal."""
-    world = cfg.slots.get("world", {})
-    base = str(world.get("base_url", "http://127.0.0.1:8000")).rstrip("/")
-    name = str(world.get("character", "hero"))
-    try:
-        with httpx.Client(base_url=base, timeout=30.0) as c:
-            skin = "men2"
-            with contextlib.suppress(Exception):  # keep the char's skin if readable, else default
-                skin = str(c.get(f"/characters/{name}").json().get("skin") or skin)
-            # delete is POST /characters/delete with the bare name (a single Body param),
-            # then recreate fresh -> L1, xp 0, spawn (0,0), full HP.
-            c.post("/characters/delete", json=name)
-            c.post("/characters/create", json={"name": name, "skin": skin})
-    except Exception as exc:
-        log.warning(
-            "character reset failed for %s (%s); episode starts from current state", name, exc
-        )
 
 
 def _cmd_v2run(args: argparse.Namespace) -> int:  # pragma: no cover - runs real model plays
     """Stochastic per-episode runner for the v2 floor test: run N episodes of a ladder tier
     (or `all`), each with a distinct decode seed (temperature > 0 -> per-episode outcome
-    variation near the frontier), capturing each episode separately. Optionally resets the
-    character between episodes so they are IID from a fresh baseline."""
-    from .introspect import bench_herobench as bh
+    variation near the frontier), capturing each episode separately. Resets the character
+    between episodes (HeroBench worlds only) so they are IID from a fresh baseline."""
+    try:
+        from .introspect import bench_herobench as bh
+    except ModuleNotFoundError as exc:
+        log.error(
+            "v2run needs the introspect extra (numpy): `uv sync --extra introspect` (%s)", exc
+        )
+        return 2
 
     tiers = list(bh.V2_LADDER) if args.tier == "all" else [args.tier]
     unknown = [t for t in tiers if t not in bh.TASKS]
@@ -459,11 +448,30 @@ def _cmd_v2run(args: argparse.Namespace) -> int:  # pragma: no cover - runs real
         task = bh.TASKS[tier]
         for ep in range(args.episodes):
             seed = args.seed_base + ep
-            cfg, path = _v2_episode_config(args.config, task, seed, out_dir)
-            if not args.no_reset:
-                _reset_herobench_character(cfg)
+            cfg, path = _v2_episode_config(args.config, task, ep, seed, out_dir)
+            if path.exists():
+                # JsonlCapture APPENDS -> never write onto an existing capture (would duplicate
+                # rows). Skip; delete the file (or use a fresh --out-dir/--seed-base) to re-run.
+                log.warning("v2run: %s exists -> skipping (delete it to re-run)", path)
+                continue
+            # Reset only for a HeroBench world: a mock/hanoi world has no character, and a blind
+            # delete/create could clobber an unrelated HeroBench serving on :8000.
+            if not args.no_reset and cfg.plugin_name("world") == "herobench":
+                world = cfg.slot_config("world")
+                try:
+                    reset_herobench_character(
+                        str(world.get("base_url", "http://127.0.0.1:8000")),
+                        str(world.get("character", "hero")),
+                    )
+                except Exception as exc:
+                    log.warning("v2run: reset failed for %s ep=%d (%s); skipping", tier, ep, exc)
+                    continue
             log.info("v2run: tier=%s ep=%d seed=%d -> %s", tier, ep, seed, path)
-            turns = _build_loop(cfg).play(cfg.max_turns)
+            try:
+                turns = _build_loop(cfg).play(cfg.max_turns)
+            except Exception as exc:
+                log.error("v2run: tier=%s ep=%d FAILED (%s); continuing", tier, ep, exc)
+                continue
             log.info("  tier=%s ep=%d: %d turns", tier, ep, len(turns))
             n += 1
     log.info("v2run: wrote %d episode captures to %s", n, out_dir)
