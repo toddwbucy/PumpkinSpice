@@ -235,16 +235,32 @@ def _cmd_mathbench(
     levels = {int(x) for x in args.levels.split(",") if x.strip()} if args.levels else None
     problems = bm.load_math_dir(args.data_dir, levels=levels, limit=args.limit)
     log.info("MATH: %d problems -> %s", len(problems), args.out)
+    # Both the batched and multi-sample paths fan out decode_one; require it up front.
+    needs_batch = args.samples > 0 or args.concurrency > 1
+    if needs_batch and not hasattr(decoder, "decode_one"):
+        log.error(
+            "batched/multi-sample decode needs a decode_one decoder (vllm/lmstudio); %r has none",
+            cfg.plugin_name("decoder"),
+        )
+        return 2
     try:
-        if args.concurrency > 1:
-            # Batched path: decode_one fanned out concurrently, vLLM batches server-side.
-            if not hasattr(decoder, "decode_one"):
-                log.error(
-                    "--concurrency %d needs a batching decoder (vllm/lmstudio); %r has none",
-                    args.concurrency,
-                    cfg.plugin_name("decoder"),
-                )
-                return 2
+        if args.samples > 0:
+            # Multi-sample protocol (arXiv:2607.01571): N stochastic trajectories per
+            # (question, style) at a nonzero temperature, per-trajectory correctness labels.
+            styles = tuple(s.strip() for s in args.styles.split(",") if s.strip())
+            turns = bm.run_math_multisample(
+                decoder,
+                problems,
+                capture,
+                styles=styles,
+                samples_per_style=args.samples,
+                temperature=args.temperature,
+                min_tokens=args.min_tokens,
+                hard_level=args.hard_level,
+                max_concurrency=args.concurrency,
+            )
+        elif args.concurrency > 1:
+            # Batched single-pass: decode_one fanned out concurrently, vLLM batches server-side.
             turns = bm.run_math_benchmark_batched(
                 decoder,
                 problems,
@@ -665,7 +681,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--concurrency",
         type=int,
         default=1,
-        help="decode this many problems at once (vLLM batches them); 1 = sequential",
+        help="decode this many trajectories at once (vLLM batches them); 1 = sequential",
+    )
+    mathp.add_argument(
+        "--samples",
+        type=int,
+        default=0,
+        help="multi-sample mode: N stochastic trajectories per (question, style); 0 = single-pass",
+    )
+    mathp.add_argument(
+        "--styles",
+        default="medium,long",
+        help="comma-separated CoT prompt styles for multi-sample mode (medium,long,short)",
+    )
+    mathp.add_argument(
+        "--temperature", type=float, default=0.7, help="sampling temperature for multi-sample mode"
+    )
+    mathp.add_argument(
+        "--min-tokens",
+        type=int,
+        default=30,
+        help="drop multi-sample trajectories shorter than this many completion tokens",
     )
     mathp.set_defaults(func=_cmd_mathbench)
 

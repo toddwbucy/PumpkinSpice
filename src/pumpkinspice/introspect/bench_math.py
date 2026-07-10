@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from pumpkinspice.contracts import Turn
 
+from ..episode import stochastic_sampler
 from ..logging import get_logger
 
 if TYPE_CHECKING:
@@ -135,13 +136,40 @@ def load_math_dir(
     return problems
 
 
-def build_prompt(problem: str) -> str:
-    """A competent, retrieval-free math prompt that pins the answer format."""
-    return (
-        "Solve the following math problem. Reason step by step, then give the final "
-        "answer enclosed in \\boxed{}.\n\n"
-        f"Problem: {problem}\n\nSolution:"
-    )
+# The paper's chain-of-thought prompting styles (arXiv:2607.01571, Appendix B). The main
+# results pool `medium` + `long`; `short` is included for completeness. Varying the style is
+# one lever the multi-sample runner uses to spread the trajectory distribution per question.
+COT_STYLES: dict[str, str] = {
+    "medium": "Think step by step. Show your reasoning, then give the final answer in \\boxed{}.",
+    "long": (
+        "Overthink this. Consider multiple approaches. Solve step by step, then second-guess "
+        "yourself. Check your work using a different method. Ask: what could I be missing? What "
+        "if I made an error? Keep thinking until you're fully satisfied. Answer in \\boxed{}."
+    ),
+    "short": (
+        "Go with your instinct. Write only the essential steps - no extra explanation. "
+        "Answer in \\boxed{}."
+    ),
+}
+
+
+def build_prompt(problem: str, style: str = "default") -> str:
+    """Render the user-message prompt for a problem. ``default`` is the repo's own competent
+    single-pass prompt; the paper's ``medium``/``long``/``short`` styles (COT_STYLES) prepend
+    the exact instruction from arXiv:2607.01571 so the multi-sample runner can reproduce it."""
+    if style == "default":
+        return (
+            "Solve the following math problem. Reason step by step, then give the final "
+            "answer enclosed in \\boxed{}.\n\n"
+            f"Problem: {problem}\n\nSolution:"
+        )
+    try:
+        instruction = COT_STYLES[style]
+    except KeyError:
+        raise ValueError(
+            f"unknown prompt style {style!r}; choose from {sorted(COT_STYLES)} or 'default'"
+        ) from None
+    return f"{instruction}\n\nProblem: {problem}"
 
 
 # --- grading (canonical MATH boxed extraction + normalization) --------------
@@ -355,31 +383,46 @@ def _math_turn(
     model: str,
     model_info: dict[str, Any],
     hard_level: int,
+    style: str | None = None,
+    sample: int | None = None,
 ) -> Turn:
     """Grade one decoded MATH answer and build its Turn-shaped capture row. Shared by the
-    sequential and batched runners so a row is identical whichever path produced it."""
+    sequential, batched, and multi-sample runners so a row is identical whichever path produced
+    it. ``style``/``sample`` (multi-sample only) record which prompt style and which sample of a
+    question this trajectory is -- the trajectory's identity within its question group."""
     correct, pred, gold = grade(raw, p.solution)
+    world_state: dict[str, Any] = {
+        "task_type": "reasoning",
+        "subject": p.subject,
+        "level": p.level,
+    }
+    outcome: dict[str, Any] = {
+        "task_type": "reasoning",
+        "correct": correct,
+        "level": p.level,
+        "hard": p.level >= hard_level,
+        "subject": p.subject,
+        "predicted": pred,
+        "gold": gold,
+        # "length" = the trace hit the token/context cap before it could emit \boxed{}, so a
+        # resulting "incorrect" is a truncation artifact, not a wrong answer (the length
+        # confound). Surfaced so the floor-test analysis can exclude/condition on it.
+        "truncated": finish_reason == "length",
+    }
+    if style is not None:
+        world_state["style"] = style
+        outcome["style"] = style
+    if sample is not None:
+        world_state["sample"] = sample
     return Turn(
         index=index,
         task=p.problem_id,
-        world_state={"task_type": "reasoning", "subject": p.subject, "level": p.level},
+        world_state=world_state,
         retrieval={},
         prompt=prompt,
         raw_output=raw,
         action={},
-        outcome={
-            "task_type": "reasoning",
-            "correct": correct,
-            "level": p.level,
-            "hard": p.level >= hard_level,
-            "subject": p.subject,
-            "predicted": pred,
-            "gold": gold,
-            # "length" = the trace hit the token/context cap before it could emit \boxed{}, so a
-            # resulting "incorrect" is a truncation artifact, not a wrong answer (the length
-            # confound). Surfaced so the floor-test analysis can exclude/condition on it.
-            "truncated": finish_reason == "length",
-        },
+        outcome=outcome,
         timings_ms={},
         reasoning=reasoning,
         model=model,
@@ -497,3 +540,115 @@ def run_math_benchmark_batched(
         log.warning("MATH batched: %d/%d problems failed to decode and were skipped", failed, n)
     # Return in problem order (captures were written in completion order; each row self-indexes).
     return [turns_by_index[i] for i in sorted(turns_by_index)]
+
+
+def run_math_multisample(
+    decoder: _BatchDecoder,
+    problems: list[MathProblem],
+    capture: _Capture,
+    *,
+    styles: tuple[str, ...] = ("medium", "long"),
+    samples_per_style: int = 5,
+    temperature: float = 0.7,
+    seed_base: int = 0,
+    hard_level: int = DEFAULT_HARD_LEVEL,
+    min_tokens: int = 30,
+    max_concurrency: int = 8,
+    log_every: int = 50,
+) -> list[Turn]:
+    """Decode N stochastic trajectories PER (question, prompt style) and record a per-trajectory
+    Turn. This is the correctness-signal protocol of arXiv:2607.01571: many samples per question
+    at a nonzero temperature yield a mix of correct/incorrect traces even from a capable model,
+    so correctness has real variance to predict; and each Turn's group is the question
+    (``Turn.task = problem_id``), so the evaluator can hold whole questions out.
+
+    Each (question, style, sample) is one job with a DISTINCT seed (reproducible). Jobs fan out
+    concurrently (vLLM batches them). A trajectory shorter than ``min_tokens`` completion tokens
+    is dropped as invalid (the paper's floor); a decode that raises is logged and skipped. Both
+    counts are logged (no silent loss). Captures are written as each completes (crash-safe).
+    """
+    minfo = dict(getattr(decoder, "model_info", {}))
+    model = str(getattr(decoder, "model", "") or "")
+    # One job per (problem, style, sample); the enumerate index is the trajectory's unique id.
+    jobs: list[tuple[int, str, int, int, str]] = []  # (problem_idx, style, sample, seed, prompt)
+    seed = seed_base
+    for pi, p in enumerate(problems):
+        for style in styles:
+            prompt = build_prompt(p.problem, style=style)
+            for si in range(samples_per_style):
+                jobs.append((pi, style, si, seed, prompt))
+                seed += 1
+    n = len(jobs)
+    turns_by_index: dict[int, Turn] = {}
+    failed = dropped = 0
+    workers = max(1, min(max_concurrency, n or 1))
+    log.info(
+        "MATH multisample: %d problems x %d styles x %d samples = %d trajectories, concurrency=%d",
+        len(problems),
+        len(styles),
+        samples_per_style,
+        n,
+        workers,
+    )
+
+    def _decode(job: tuple[int, str, int, int, str]) -> DecodeResult:
+        _pi, _style, _si, jseed, jprompt = job
+        return decoder.decode_one(jprompt, stochastic_sampler(temperature, jseed))
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_decode, jobs[j]): j for j in range(n)}
+        for fut in as_completed(futures):
+            j = futures[fut]
+            pi, style, si, _seed, prompt = jobs[j]
+            p = problems[pi]
+            try:
+                res = fut.result()
+            except Exception as e:  # one bad decode must not abort the whole run
+                failed += 1
+                log.warning(
+                    "multisample q=%s style=%s sample=%d failed, skipped: %s",
+                    p.problem_id,
+                    style,
+                    si,
+                    e,
+                )
+                continue
+            if res.completion_tokens < min_tokens:
+                dropped += 1  # too-short trajectory is invalid (paper's floor)
+                continue
+            turn = _math_turn(
+                j,
+                p,
+                prompt=prompt,
+                raw=res.content,
+                reasoning=res.reasoning,
+                finish_reason=res.finish_reason,
+                prompt_tokens=res.prompt_tokens,
+                completion_tokens=res.completion_tokens,
+                request=dict(res.request),
+                model=model,
+                model_info=minfo,
+                hard_level=hard_level,
+                style=style,
+                sample=si,
+            )
+            capture.record(turn)
+            turns_by_index[j] = turn
+            kept = len(turns_by_index)
+            if kept % log_every == 0 or kept + failed + dropped == n:
+                log.info(
+                    "MATH multisample: %d kept, %d dropped(<%d tok), %d failed of %d",
+                    kept,
+                    dropped,
+                    min_tokens,
+                    failed,
+                    n,
+                )
+    if failed or dropped:
+        log.warning(
+            "MATH multisample: %d/%d trajectories dropped (short) and %d failed to decode",
+            dropped,
+            n,
+            failed,
+        )
+    return [turns_by_index[j] for j in sorted(turns_by_index)]
