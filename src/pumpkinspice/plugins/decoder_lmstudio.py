@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
+from pumpkinspice.model_probe import fetch_model_entry
 from pumpkinspice.plugins.decoder_openai_compat import OpenAICompatDecoder
 
 DEFAULT_BASE_URL = "http://192.168.0.203:1234"
@@ -43,25 +44,21 @@ class LMStudioDecoder(OpenAICompatDecoder):
     require_model: ClassVar[bool] = False
 
     def _discover_model_info(self) -> dict[str, Any]:
-        """LMStudio's native ``/api/v0/models`` reports the loaded GGUF's quantization and
-        the context length it actually loaded at -- so a pinned-GGUF scored run records both
-        without the operator declaring them (and a silent context downgrade is caught). Same
-        best-effort contract as the base: ``{}`` on any error. Server-verified fields win over
-        any declared ``quantization`` because they reflect what is really loaded."""
-        try:
-            resp = self._client.get("/api/v0/models")
-            resp.raise_for_status()
-            for m in resp.json().get("data", []):
-                if not self.model or m.get("id") == self.model:
-                    out: dict[str, Any] = {}
-                    if m.get("quantization") is not None:
-                        out["quantization"] = m["quantization"]
-                    if m.get("arch") is not None:
-                        out["arch"] = m["arch"]
-                    ctx = m.get("loaded_context_length")
-                    if ctx is not None:
-                        out["served_context_length"] = ctx
-                    return out
-        except Exception:  # provenance discovery must never break a run
+        """LMStudio's native ``/api/v0/models`` reports the loaded GGUF's quantization, arch,
+        and the context length it actually loaded at -- so a pinned-GGUF scored run records
+        them without the operator declaring them (and a silent context downgrade is caught).
+        When no model is configured (LMStudio's decode-whatever-is-loaded default) the shared
+        probe selects the entry whose ``state`` is loaded, not just the first of every
+        downloaded model; ``state`` is recorded for audit. Best-effort ``{}`` on any error;
+        server-verified fields win over any declared ``quantization`` since they reflect what
+        is really loaded."""
+        m = fetch_model_entry(self._client, "/api/v0/models", self.model)
+        if not m:
             return {}
-        return {}
+        field_map = {
+            "quantization": "quantization",
+            "arch": "arch",
+            "state": "state",
+            "loaded_context_length": "served_context_length",
+        }
+        return {dst: m[src] for src, dst in field_map.items() if m.get(src) is not None}

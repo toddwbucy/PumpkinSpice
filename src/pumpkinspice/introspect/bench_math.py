@@ -342,6 +342,10 @@ def run_math_benchmark(
         raw = decoder.complete(prompt, sampler=sampler)
         correct, pred, gold = grade(raw, p.solution)
         usage = getattr(decoder, "last_usage", {}) or {}
+        # "length" = the reasoning trace was cut off at the cap before it could emit \boxed{},
+        # so a resulting "incorrect" is a truncation artifact, not a wrong answer. Surface it on
+        # the outcome so the evaluator can exclude/condition on it (the length confound).
+        finish_reason = str(getattr(decoder, "last_finish_reason", "") or "")
         turn = Turn(
             index=i,
             task=p.problem_id,
@@ -358,6 +362,9 @@ def run_math_benchmark(
                 "subject": p.subject,
                 "predicted": pred,
                 "gold": gold,
+                # True when the trace hit the token/context cap -> an "incorrect" that is a
+                # truncation artifact, not a wrong answer (excludable in the floor-test analysis).
+                "truncated": finish_reason == "length",
             },
             timings_ms={},
             reasoning=str(getattr(decoder, "last_reasoning", "") or ""),
@@ -368,6 +375,7 @@ def run_math_benchmark(
             # its IV too, else no-think and baseline math runs are indistinguishable.
             decode=dict(getattr(decoder, "last_request", {})),
             model_info=minfo,
+            finish_reason=finish_reason,
         )
         capture.record(turn)
         turns.append(turn)

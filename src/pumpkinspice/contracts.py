@@ -107,6 +107,12 @@ class Turn:
     # #7/#8 trajectory geometry must be able to condition on it. Empty for decoders that do not
     # expose `model_info` (mock/echo).
     model_info: dict[str, Any] = field(default_factory=dict)
+    # The decoder's stop reason for this turn ("stop" = natural end, "length" = hit the token/
+    # context cap, "" if not reported). A "length" finish means the reply was TRUNCATED -- for a
+    # reasoning task that is a cut-off trace with no final answer, which grades "incorrect" in a
+    # LENGTH-correlated way. Recording it lets analysis separate "hit the wall" from "genuinely
+    # wrong" instead of conflating them (the confound the floor test must rule out).
+    finish_reason: str = ""
 
 
 # --- Plugin Protocols -------------------------------------------------------

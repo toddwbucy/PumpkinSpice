@@ -26,6 +26,8 @@ from typing import Any, ClassVar
 
 import httpx
 
+from pumpkinspice.model_probe import fetch_model_entry
+
 log = logging.getLogger(__name__)
 
 
@@ -75,10 +77,18 @@ class OpenAICompatDecoder:
         # endpoint, so a pinned-GGUF scored run records quant without declaring it.
         self.quantization = config.get("quantization")
         self.dtype = config.get("dtype") or config.get("precision")
-        self._model_info: dict[str, Any] | None = None
+        # Server-verified half of model_info (context length, and for LMStudio quant/arch),
+        # memoized ONLY once discovery succeeds -- so a transient blip at first access is
+        # retried, not permanently cached as "no server data" (which would strip the
+        # served-window proof from the whole capture). None = not yet discovered.
+        self._discovered: dict[str, Any] | None = None
         # The chain-of-thought from the most recent complete() (reasoning models
         # return it separately from the answer). Captured per turn by the loop.
         self.last_reasoning: str = ""
+        # The stop reason from the most recent complete() ("stop"/"length"/...); "length" means
+        # the reply was truncated at the cap. Captured per turn so a cut-off (answerless) trace
+        # is distinguishable from a wrong answer.
+        self.last_finish_reason: str = ""
         # Token counts from the most recent complete() (prompt_tokens, completion_tokens).
         self.last_usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
         # The ACTUAL request body sent by the most recent complete(), minus the prompt
@@ -121,6 +131,7 @@ class OpenAICompatDecoder:
         # reasoning/usage for THIS turn, not the previous turn's stale values (which
         # would double-count its tokens and mis-attribute its chain-of-thought).
         self.last_reasoning = ""
+        self.last_finish_reason = ""
         self.last_usage = {"prompt_tokens": 0, "completion_tokens": 0}
         self.last_request = {}
         s = {**self._defaults, **(sampler or {})}
@@ -146,7 +157,11 @@ class OpenAICompatDecoder:
         resp = self._client.post("/v1/chat/completions", json=payload)
         resp.raise_for_status()
         body = resp.json()
-        message = body["choices"][0]["message"]
+        choice = body["choices"][0]
+        message = choice["message"]
+        # Stop reason: "length" = truncated at the token/context cap (a reasoning trace cut off
+        # before its answer). Recorded per turn so this is not misread as a wrong answer.
+        self.last_finish_reason = str(choice.get("finish_reason") or "")
         # Token throughput: prompt/completion token counts from `usage` make the
         # per-turn decode latency interpretable (a slow turn = big prompt? long
         # generation? -- not just a wall-clock number). Derived tok/s is computed
@@ -175,40 +190,37 @@ class OpenAICompatDecoder:
         """The served model's environment (precision + context window), for capture
         provenance (Turn.model_info). Combines OPERATOR-DECLARED precision (config
         ``quantization``/``dtype``) with SERVER-VERIFIED fields (the context length the
-        server actually loaded). Cached after the first access; best-effort, so a server
-        that does not expose model metadata just yields the declared fields (never raises,
-        never blocks a run)."""
-        if self._model_info is None:
-            info: dict[str, Any] = {"backend": self.name}
-            if self.model:
-                info["model"] = self.model
-            if self.quantization is not None:
-                info["quantization"] = self.quantization
-            if self.dtype is not None:
-                info["dtype"] = self.dtype
-            # Server-verified fields last so a real loaded context length is authoritative
-            # over anything declared (and so a silent downgrade is visible in the capture).
-            info.update(self._discover_model_info())
-            self._model_info = info
-        return self._model_info
+        server actually loaded; server values win). Best-effort: a server with no model
+        metadata just yields the declared fields (never raises, never blocks a run). The
+        server half is cached only once discovery SUCCEEDS, so a transient blip at the first
+        access -- e.g. the MATH runner snapshotting this before the first decode -- is retried,
+        not memoized as permanently absent."""
+        declared: dict[str, Any] = {"backend": self.name}
+        if self.model:
+            declared["model"] = self.model
+        if self.quantization is not None:
+            declared["quantization"] = self.quantization
+        if self.dtype is not None:
+            declared["dtype"] = self.dtype
+        if self._discovered is not None:
+            disc = self._discovered
+        else:
+            disc = self._discover_model_info()
+            if disc:  # cache only a non-empty (successful) discovery; retry a blip next access
+                self._discovered = disc
+        # server-verified fields last so a real loaded context/quant wins over anything declared
+        return {**declared, **disc}
 
     def _discover_model_info(self) -> dict[str, Any]:
         """Best-effort query of the served context window from the OpenAI-compatible
         ``/v1/models`` endpoint. vLLM reports ``max_model_len``; record it as
         ``served_context_length`` so the capture proves the run got the intended window
         (cf. the parity gate finding a model silently loaded at 8192, not ~200k). Returns
-        ``{}`` on any error -- provenance is nice-to-have, never a run-breaker. LMStudio's
-        native quant/context live on a different endpoint (see the subclass override)."""
-        try:
-            resp = self._client.get("/v1/models")
-            resp.raise_for_status()
-            for m in resp.json().get("data", []):
-                if not self.model or m.get("id") == self.model:
-                    out: dict[str, Any] = {}
-                    ctx = m.get("max_model_len")
-                    if ctx is not None:
-                        out["served_context_length"] = ctx
-                    return out
-        except Exception:  # provenance discovery must never break a run
+        ``{}`` when the endpoint has no match/field; the shared probe uses a short timeout
+        and swallows errors. LMStudio's native quant/context live on a different endpoint
+        (see the subclass override)."""
+        m = fetch_model_entry(self._client, "/v1/models", self.model)
+        if not m:
             return {}
-        return {}
+        ctx = m.get("max_model_len")
+        return {"served_context_length": ctx} if ctx is not None else {}
