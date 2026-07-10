@@ -25,11 +25,19 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from pumpkinspice.contracts import Turn
+
+from ..logging import get_logger
+
+if TYPE_CHECKING:
+    from pumpkinspice.plugins.decoder_openai_compat import DecodeResult
+
+log = get_logger("pumpkinspice.mathbench")
 
 # Optional robust grader (sympy/LaTeX equivalence). The string normalization below misses
 # mathematically-equal answers (bmatrix vs pmatrix, 1/4 vs 0.25, reordered tuples), which
@@ -58,6 +66,12 @@ class MathProblem:
 
 class _Decoder(Protocol):
     def complete(self, prompt: str, *, sampler: dict[str, Any] | None = None) -> str: ...
+
+
+class _BatchDecoder(Protocol):
+    # The batched runner fans this out concurrently; it returns the result by value (no shared
+    # last_* snapshot), unlike complete(). Satisfied by OpenAICompatDecoder (vLLM/LMStudio).
+    def decode_one(self, prompt: str, sampler: dict[str, Any] | None = None) -> DecodeResult: ...
 
 
 class _Capture(Protocol):
@@ -319,6 +333,58 @@ def regrade_rows(rows: list[dict[str, Any]]) -> int:
 # --- runner -----------------------------------------------------------------
 
 
+def _math_turn(
+    index: int,
+    p: MathProblem,
+    *,
+    prompt: str,
+    raw: str,
+    reasoning: str,
+    finish_reason: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    request: dict[str, Any],
+    model: str,
+    model_info: dict[str, Any],
+    hard_level: int,
+) -> Turn:
+    """Grade one decoded MATH answer and build its Turn-shaped capture row. Shared by the
+    sequential and batched runners so a row is identical whichever path produced it."""
+    correct, pred, gold = grade(raw, p.solution)
+    return Turn(
+        index=index,
+        task=p.problem_id,
+        world_state={"task_type": "reasoning", "subject": p.subject, "level": p.level},
+        retrieval={},
+        prompt=prompt,
+        raw_output=raw,
+        action={},
+        outcome={
+            "task_type": "reasoning",
+            "correct": correct,
+            "level": p.level,
+            "hard": p.level >= hard_level,
+            "subject": p.subject,
+            "predicted": pred,
+            "gold": gold,
+            # "length" = the trace hit the token/context cap before it could emit \boxed{}, so a
+            # resulting "incorrect" is a truncation artifact, not a wrong answer (the length
+            # confound). Surfaced so the floor-test analysis can exclude/condition on it.
+            "truncated": finish_reason == "length",
+        },
+        timings_ms={},
+        reasoning=reasoning,
+        model=model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        # Decode provenance -- the reasoning (MATH) arm must record its IV too, else no-think
+        # and baseline math runs are indistinguishable.
+        decode=request,
+        model_info=model_info,
+        finish_reason=finish_reason,
+    )
+
+
 def run_math_benchmark(
     decoder: _Decoder,
     problems: list[MathProblem],
@@ -327,56 +393,99 @@ def run_math_benchmark(
     hard_level: int = DEFAULT_HARD_LEVEL,
     sampler: dict[str, Any] | None = None,
 ) -> list[Turn]:
-    """Decode each problem, grade it, and record a Turn-shaped capture.
+    """Decode each problem SEQUENTIALLY, grade it, and record a Turn-shaped capture.
 
     The capture's ``outcome`` carries the labels the evaluator needs: ``correct``
     (answer graded), ``level`` and ``hard`` (independent difficulty), plus the
     extracted ``predicted``/``gold`` for auditing. ``task_type`` is "reasoning".
+    See ``run_math_benchmark_batched`` for the concurrent path used on vLLM.
     """
     turns: list[Turn] = []
     # The served precision + context window are run-level, not per-turn; snapshot once and
     # stamp every row so a capture is self-describing without a separate run header.
     minfo = dict(getattr(decoder, "model_info", {}))
+    model = str(getattr(decoder, "model", "") or "")
     for i, p in enumerate(problems):
         prompt = build_prompt(p.problem)
         raw = decoder.complete(prompt, sampler=sampler)
-        correct, pred, gold = grade(raw, p.solution)
         usage = getattr(decoder, "last_usage", {}) or {}
-        # "length" = the reasoning trace was cut off at the cap before it could emit \boxed{},
-        # so a resulting "incorrect" is a truncation artifact, not a wrong answer. Surface it on
-        # the outcome so the evaluator can exclude/condition on it (the length confound).
-        finish_reason = str(getattr(decoder, "last_finish_reason", "") or "")
-        turn = Turn(
-            index=i,
-            task=p.problem_id,
-            world_state={"task_type": "reasoning", "subject": p.subject, "level": p.level},
-            retrieval={},
+        turn = _math_turn(
+            i,
+            p,
             prompt=prompt,
-            raw_output=raw,
-            action={},
-            outcome={
-                "task_type": "reasoning",
-                "correct": correct,
-                "level": p.level,
-                "hard": p.level >= hard_level,
-                "subject": p.subject,
-                "predicted": pred,
-                "gold": gold,
-                # True when the trace hit the token/context cap -> an "incorrect" that is a
-                # truncation artifact, not a wrong answer (excludable in the floor-test analysis).
-                "truncated": finish_reason == "length",
-            },
-            timings_ms={},
+            raw=raw,
             reasoning=str(getattr(decoder, "last_reasoning", "") or ""),
-            model=str(getattr(decoder, "model", "") or ""),
+            finish_reason=str(getattr(decoder, "last_finish_reason", "") or ""),
             prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
             completion_tokens=int(usage.get("completion_tokens", 0) or 0),
-            # Same decode provenance as the agent loop: the reasoning (MATH) arm must record
-            # its IV too, else no-think and baseline math runs are indistinguishable.
-            decode=dict(getattr(decoder, "last_request", {})),
+            request=dict(getattr(decoder, "last_request", {})),
+            model=model,
             model_info=minfo,
-            finish_reason=finish_reason,
+            hard_level=hard_level,
         )
         capture.record(turn)
         turns.append(turn)
     return turns
+
+
+def run_math_benchmark_batched(
+    decoder: _BatchDecoder,
+    problems: list[MathProblem],
+    capture: _Capture,
+    *,
+    hard_level: int = DEFAULT_HARD_LEVEL,
+    sampler: dict[str, Any] | None = None,
+    max_concurrency: int = 8,
+    log_every: int = 10,
+) -> list[Turn]:
+    """Decode all problems CONCURRENTLY (vLLM batches the in-flight requests server-side), so a
+    single-pass MATH set finishes in a fraction of the sequential wall-clock. Same graded,
+    labeled Turn rows as ``run_math_benchmark``.
+
+    Captures are written AS each decode completes (from the main thread, so the append-only sink
+    stays single-writer) -- progressive and crash-safe for a long run. A decode that raises
+    (timeout, transient 5xx) is logged and skipped, not fatal; the skipped count is logged at the
+    end (no silent loss). ``max_concurrency`` bounds in-flight requests; vLLM queues the rest.
+    """
+    minfo = dict(getattr(decoder, "model_info", {}))
+    model = str(getattr(decoder, "model", "") or "")
+    prompts = [build_prompt(p.problem) for p in problems]
+    n = len(problems)
+    turns_by_index: dict[int, Turn] = {}
+    failed = 0
+    workers = max(1, min(max_concurrency, n or 1))
+    log.info("MATH batched: %d problems, concurrency=%d", n, workers)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(decoder.decode_one, prompts[i], sampler): i for i in range(n)}
+        for fut in as_completed(futures):
+            i = futures[fut]
+            p = problems[i]
+            try:
+                res = fut.result()
+            except Exception as e:  # one bad decode must not abort the whole run
+                failed += 1
+                log.warning("MATH decode %d (%s L%d) failed, skipped: %s", i, p.subject, p.level, e)
+                continue
+            turn = _math_turn(
+                i,
+                p,
+                prompt=prompts[i],
+                raw=res.content,
+                reasoning=res.reasoning,
+                finish_reason=res.finish_reason,
+                prompt_tokens=res.prompt_tokens,
+                completion_tokens=res.completion_tokens,
+                request=dict(res.request),
+                model=model,
+                model_info=minfo,
+                hard_level=hard_level,
+            )
+            capture.record(turn)  # main-thread write -> single-writer, crash-safe, progressive
+            turns_by_index[i] = turn
+            done = len(turns_by_index)
+            if done % log_every == 0 or done + failed == n:
+                log.info("MATH batched: %d/%d decoded (%d failed)", done, n, failed)
+    if failed:
+        log.warning("MATH batched: %d/%d problems failed to decode and were skipped", failed, n)
+    # Return in problem order (captures were written in completion order; each row self-indexes).
+    return [turns_by_index[i] for i in sorted(turns_by_index)]

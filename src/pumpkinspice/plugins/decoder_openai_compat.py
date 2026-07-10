@@ -22,6 +22,7 @@ these attributes conforms with no extra boilerplate.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 import httpx
@@ -29,6 +30,24 @@ import httpx
 from pumpkinspice.model_probe import fetch_model_entry
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class DecodeResult:
+    """One decode's full result, returned by value instead of stashed on the decoder.
+
+    ``complete()`` keeps its single-call ``last_*`` snapshot for the sequential agent loop,
+    but that snapshot is shared mutable state -- unsafe under the concurrent decoding the
+    batched MATH path uses. ``complete_many()`` returns one of these per prompt so nothing is
+    clobbered across threads. Fields mirror the ``last_*`` snapshot: ``content`` is the answer,
+    ``request`` is the decode provenance (the payload minus the messages)."""
+
+    content: str
+    reasoning: str = ""
+    finish_reason: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    request: dict[str, Any] = field(default_factory=dict)
 
 
 class OpenAICompatDecoder:
@@ -125,15 +144,10 @@ class OpenAICompatDecoder:
             base_url=self.base_url, timeout=self.timeout, transport=transport
         )
 
-    def complete(self, prompt: str, *, sampler: dict[str, Any] | None = None) -> str:
-        # Clear per-call state up front: if the request raises (e.g. a 400 when the
-        # prompt exceeds a small-context model's window), the caller must see cleared
-        # reasoning/usage for THIS turn, not the previous turn's stale values (which
-        # would double-count its tokens and mis-attribute its chain-of-thought).
-        self.last_reasoning = ""
-        self.last_finish_reason = ""
-        self.last_usage = {"prompt_tokens": 0, "completion_tokens": 0}
-        self.last_request = {}
+    def _build_payload(
+        self, prompt: str, sampler: dict[str, Any] | None
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Build the chat payload and the provenance snapshot (payload minus messages)."""
         s = {**self._defaults, **(sampler or {})}
         # extra_body FIRST so reserved fields win over it: the greedy/parity sampler (`s`,
         # incl. the per-call sampler=), messages, max_tokens, and model must not be
@@ -149,41 +163,68 @@ class OpenAICompatDecoder:
             payload["max_tokens"] = self.max_tokens
         if self.model:
             payload["model"] = self.model
-        # Snapshot the request AS SENT (minus the prompt) for capture provenance: reserved
-        # keys that clobbered extra_body are reflected as they went on the wire, and
-        # max_tokens/model are included. Set before the POST so a raising request still
-        # records what was attempted.
-        self.last_request = {k: v for k, v in payload.items() if k != "messages"}
+        request = {k: v for k, v in payload.items() if k != "messages"}
+        return payload, request
+
+    def _send(self, payload: dict[str, Any], request: dict[str, Any]) -> DecodeResult:
+        """POST one chat payload and parse it into a DecodeResult. Touches no ``self``
+        state, so it is safe to call concurrently (httpx.Client is thread-safe)."""
         resp = self._client.post("/v1/chat/completions", json=payload)
         resp.raise_for_status()
         body = resp.json()
         choice = body["choices"][0]
         message = choice["message"]
         # Stop reason: "length" = truncated at the token/context cap (a reasoning trace cut off
-        # before its answer). Recorded per turn so this is not misread as a wrong answer.
-        self.last_finish_reason = str(choice.get("finish_reason") or "")
-        # Token throughput: prompt/completion token counts from `usage` make the
-        # per-turn decode latency interpretable (a slow turn = big prompt? long
-        # generation? -- not just a wall-clock number). Derived tok/s is computed
-        # by the loop, which owns the wall-clock.
+        # before its answer). Recorded so this is not misread as a wrong answer.
+        finish_reason = str(choice.get("finish_reason") or "")
+        # Token throughput: prompt/completion counts make decode latency interpretable
+        # (big prompt? long generation? -- not just a wall-clock number).
         usage = body.get("usage") or {}
-        self.last_usage = {
-            "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
-            "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
-        }
-        # Capture the chain-of-thought so the harness can record it per turn. Field
-        # name varies by model family: Qwen-style models use `reasoning_content`,
-        # gpt-oss (harmony) uses `reasoning`. Prefer the former, fall back to the
-        # latter -- without this, gpt-oss's thinking is silently dropped (its tokens
-        # still count in usage.completion_tokens, so a turn looks expensive with no
-        # visible reason). vLLM populates `reasoning_content` when run with a
-        # --reasoning-parser, so the same handling covers both backends.
+        # Chain-of-thought field varies by model family: Qwen-style uses `reasoning_content`,
+        # gpt-oss (harmony) uses `reasoning`. Prefer the former, fall back to the latter --
+        # else gpt-oss's thinking is silently dropped (its tokens still count in usage). vLLM
+        # populates `reasoning_content` when run with a --reasoning-parser.
         reasoning = message.get("reasoning_content") or message.get("reasoning")
-        self.last_reasoning = reasoning if isinstance(reasoning, str) else ""
-        # A reasoning model that did not finish thinking returns content: null. Map
-        # null -> "" so the empty case is detectable, not the string "None".
+        # A reasoning model that did not finish thinking returns content: null -> "" so the
+        # empty case is detectable, not the string "None".
         content = message.get("content")
-        return content if isinstance(content, str) else ""
+        return DecodeResult(
+            content=content if isinstance(content, str) else "",
+            reasoning=reasoning if isinstance(reasoning, str) else "",
+            finish_reason=finish_reason,
+            prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
+            completion_tokens=int(usage.get("completion_tokens", 0) or 0),
+            request=request,
+        )
+
+    def decode_one(self, prompt: str, sampler: dict[str, Any] | None = None) -> DecodeResult:
+        """Decode one prompt, returning the result by value with NO ``self`` mutation -- the
+        thread-safe unit the batched MATH runner fans out concurrently (httpx.Client is
+        thread-safe; vLLM batches the in-flight requests server-side). ``complete()`` is the
+        sequential path that additionally stashes the ``last_*`` snapshot for the agent loop."""
+        payload, request = self._build_payload(prompt, sampler)
+        return self._send(payload, request)
+
+    def complete(self, prompt: str, *, sampler: dict[str, Any] | None = None) -> str:
+        # Clear per-call state up front: if the request raises (e.g. a 400 when the
+        # prompt exceeds a small-context model's window), the caller must see cleared
+        # reasoning/usage for THIS turn, not the previous turn's stale values (which
+        # would double-count its tokens and mis-attribute its chain-of-thought).
+        self.last_reasoning = ""
+        self.last_finish_reason = ""
+        self.last_usage = {"prompt_tokens": 0, "completion_tokens": 0}
+        self.last_request = {}
+        payload, request = self._build_payload(prompt, sampler)
+        # Record the attempt BEFORE the POST so a raising request still shows what was sent.
+        self.last_request = request
+        res = self._send(payload, request)
+        self.last_usage = {
+            "prompt_tokens": res.prompt_tokens,
+            "completion_tokens": res.completion_tokens,
+        }
+        self.last_finish_reason = res.finish_reason
+        self.last_reasoning = res.reasoning
+        return res.content
 
     @property
     def model_info(self) -> dict[str, Any]:

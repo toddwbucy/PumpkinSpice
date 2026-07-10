@@ -187,6 +187,88 @@ def test_run_math_benchmark_grades_and_labels(tmp_path) -> None:  # type: ignore
     assert by_level[2].outcome["truncated"] is False
 
 
+def _vllm_mock(handler):  # type: ignore[no-untyped-def]
+    import httpx
+
+    from pumpkinspice.plugins.decoder_vllm import VLLMDecoder
+
+    d = VLLMDecoder({"base_url": "http://x", "model": "m", "quantization": "none"})
+    d._client = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://x")
+    return d
+
+
+def test_run_math_benchmark_batched_grades_labels_and_stamps(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import httpx
+
+    from pumpkinspice.introspect.bench_math import run_math_benchmark_batched
+
+    _write_math(tmp_path, "Algebra", "1.json", problem="2+2?", level=2, solution=r"\boxed{4}")
+    _write_math(tmp_path, "Algebra", "2.json", problem="hard", level=5, solution=r"\boxed{99}")
+    problems = load_math_dir(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "m", "max_model_len": 32768}]})
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"content": r"so \boxed{4}", "reasoning_content": "cot"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 7},
+            },
+        )
+
+    d = _vllm_mock(handler)
+    cap = _MemCapture()
+    turns = run_math_benchmark_batched(d, problems, cap, hard_level=4, max_concurrency=4)
+
+    assert len(turns) == 2 and len(cap.turns) == 2
+    assert [t.index for t in turns] == [0, 1]  # returned in problem order despite concurrency
+    by_level = {t.outcome["level"]: t for t in turns}
+    assert by_level[2].outcome["correct"] is True  # gold 4, answer 4
+    assert by_level[5].outcome["correct"] is False  # gold 99, answer 4
+    assert by_level[2].outcome["truncated"] is False  # finish_reason "stop"
+    # provenance + fields stamped the same as the sequential path
+    assert turns[0].model_info["served_context_length"] == 32768
+    assert turns[0].reasoning == "cot" and turns[0].finish_reason == "stop"
+    assert turns[0].completion_tokens == 7
+    # the concurrent decodes did not touch the sequential snapshot
+    assert d.last_reasoning == "" and d.last_request == {}
+
+
+def test_run_math_benchmark_batched_skips_failed_decode(tmp_path, caplog) -> None:  # type: ignore[no-untyped-def]
+    import httpx
+
+    from pumpkinspice.introspect.bench_math import run_math_benchmark_batched
+
+    _write_math(tmp_path, "Algebra", "1.json", problem="ok", level=3, solution=r"\boxed{4}")
+    _write_math(tmp_path, "Algebra", "2.json", problem="boom", level=3, solution=r"\boxed{4}")
+    problems = load_math_dir(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "m", "max_model_len": 32768}]})
+        body = json.loads(request.content)
+        if "boom" in body["messages"][0]["content"]:
+            return httpx.Response(500, json={"error": "kaboom"})  # one decode fails
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": r"\boxed{4}"}, "finish_reason": "stop"}]}
+        )
+
+    d = _vllm_mock(handler)
+    cap = _MemCapture()
+    with caplog.at_level("WARNING"):
+        turns = run_math_benchmark_batched(d, problems, cap, max_concurrency=2)
+
+    # the good problem is recorded; the failing one is skipped (logged), not fatal
+    assert len(turns) == 1 and turns[0].outcome["correct"] is True
+    assert any("failed" in r.message and "skipped" in r.message for r in caplog.records)
+
+
 def test_run_math_benchmark_flags_truncated_traces(tmp_path) -> None:  # type: ignore[no-untyped-def]
     # A trace cut off at the cap (finish_reason "length") emits no \boxed{} -> graded
     # "incorrect", but outcome.truncated marks it so the floor-test analysis can exclude it
