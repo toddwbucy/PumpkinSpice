@@ -83,6 +83,19 @@ def test_load_math_dir_names_bad_file(tmp_path) -> None:  # type: ignore[no-unty
         load_math_dir(tmp_path)
 
 
+def test_load_math_dir_skips_non_problem_json(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # A corpus dir may hold a non-problem JSON (e.g. seed_math500's manifest, a list) --
+    # that must be skipped, not crash the loader; a real problem still loads.
+    _write_math(tmp_path, "Algebra", "1.json", problem="2+2?", level=2, solution=r"\boxed{4}")
+    (tmp_path / "manifest.json").write_text(json.dumps([{"unique_id": "x", "level": 1}]))
+    problems = load_math_dir(tmp_path)
+    assert [p.problem for p in problems] == ["2+2?"]  # manifest skipped, problem kept
+    # ...but a problem-shaped dict missing a required key still fails loudly
+    (tmp_path / "Algebra" / "broken.json").write_text(json.dumps({"problem": "x"}))  # no solution
+    with pytest.raises(ValueError, match=r"broken\.json"):
+        load_math_dir(tmp_path)
+
+
 def test_is_equiv_forms() -> None:
     assert is_equiv(r"\frac{1}{2}", "1/2")
     assert is_equiv(r"\dfrac{1}{2}", r"\frac{1}{2}")

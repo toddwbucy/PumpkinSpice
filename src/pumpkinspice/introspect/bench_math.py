@@ -104,9 +104,17 @@ def load_math_dir(
         # JSONDecodeError / KeyError from one bad file is near-impossible to locate.
         try:
             data = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            raise ValueError(f"{path}: malformed MATH problem JSON: {exc}") from exc
+        # A corpus dir may legitimately hold a non-problem JSON (e.g. a manifest/index list);
+        # skip anything that is not a problem-shaped object rather than crashing on it. A dict
+        # that IS problem-shaped but missing a required key still fails loudly below.
+        if not isinstance(data, dict):
+            continue
+        try:
             problem = str(data["problem"])
             solution = str(data["solution"])
-        except (json.JSONDecodeError, KeyError, OSError) as exc:
+        except KeyError as exc:
             raise ValueError(f"{path}: malformed MATH problem JSON: {exc}") from exc
         m = _LEVEL_RE.search(str(data.get("level", "")))
         level = int(m.group(1)) if m else 0
