@@ -334,11 +334,18 @@ def run_math_benchmark(
     extracted ``predicted``/``gold`` for auditing. ``task_type`` is "reasoning".
     """
     turns: list[Turn] = []
+    # The served precision + context window are run-level, not per-turn; snapshot once and
+    # stamp every row so a capture is self-describing without a separate run header.
+    minfo = dict(getattr(decoder, "model_info", {}))
     for i, p in enumerate(problems):
         prompt = build_prompt(p.problem)
         raw = decoder.complete(prompt, sampler=sampler)
         correct, pred, gold = grade(raw, p.solution)
         usage = getattr(decoder, "last_usage", {}) or {}
+        # "length" = the reasoning trace was cut off at the cap before it could emit \boxed{},
+        # so a resulting "incorrect" is a truncation artifact, not a wrong answer. Surface it on
+        # the outcome so the evaluator can exclude/condition on it (the length confound).
+        finish_reason = str(getattr(decoder, "last_finish_reason", "") or "")
         turn = Turn(
             index=i,
             task=p.problem_id,
@@ -355,6 +362,9 @@ def run_math_benchmark(
                 "subject": p.subject,
                 "predicted": pred,
                 "gold": gold,
+                # True when the trace hit the token/context cap -> an "incorrect" that is a
+                # truncation artifact, not a wrong answer (excludable in the floor-test analysis).
+                "truncated": finish_reason == "length",
             },
             timings_ms={},
             reasoning=str(getattr(decoder, "last_reasoning", "") or ""),
@@ -364,6 +374,8 @@ def run_math_benchmark(
             # Same decode provenance as the agent loop: the reasoning (MATH) arm must record
             # its IV too, else no-think and baseline math runs are indistinguishable.
             decode=dict(getattr(decoder, "last_request", {})),
+            model_info=minfo,
+            finish_reason=finish_reason,
         )
         capture.record(turn)
         turns.append(turn)

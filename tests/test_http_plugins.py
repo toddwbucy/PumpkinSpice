@@ -327,3 +327,154 @@ def test_world_get_state_raises_with_context_after_retry(monkeypatch) -> None:
     world._client = httpx.Client(base_url="http://world", transport=httpx.MockTransport(handler))
     with pytest.raises(RuntimeError, match="after retry"):
         world.get_state()
+
+
+def test_vllm_model_info_declared_precision_and_served_context() -> None:
+    # vLLM's /v1/models exposes max_model_len but NOT precision, so precision is
+    # operator-declared (quantization/dtype) and the context window is server-verified.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/models"
+        return httpx.Response(
+            200, json={"data": [{"id": "Qwen/Qwen3.6-27B", "max_model_len": 32768}]}
+        )
+
+    d = VLLMDecoder(
+        {
+            "base_url": "http://x",
+            "model": "Qwen/Qwen3.6-27B",
+            "quantization": "none",
+            "dtype": "bfloat16",
+        }
+    )
+    d._client = _mock_client(handler, "http://x")
+    info = d.model_info
+    assert info["backend"] == "vllm"
+    assert info["model"] == "Qwen/Qwen3.6-27B"
+    assert info["quantization"] == "none"  # declared
+    assert info["dtype"] == "bfloat16"  # declared
+    assert info["served_context_length"] == 32768  # server-verified
+    # the server half is cached after a successful discovery: a second access does NOT re-query
+    calls = {"n": 0}
+
+    def counting(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, json={"data": [{"id": "Qwen/Qwen3.6-27B", "max_model_len": 1}]})
+
+    d._client = _mock_client(counting, "http://x")
+    again = d.model_info
+    assert calls["n"] == 0  # no re-query
+    assert again == info and again["served_context_length"] == 32768  # cached, not the "1" blip
+
+
+def test_model_info_is_best_effort_when_server_has_no_metadata() -> None:
+    # A server that 404s /v1/models must not break provenance: the declared fields survive,
+    # server-verified ones are simply absent.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": "nope"})
+
+    d = VLLMDecoder({"base_url": "http://x", "model": "m", "quantization": "none"})
+    d._client = _mock_client(handler, "http://x")
+    info = d.model_info
+    assert info["quantization"] == "none"
+    assert "served_context_length" not in info
+
+
+def test_lmstudio_model_info_reads_native_quant_and_context() -> None:
+    # The pinned-GGUF path discovers quantization + loaded context from LMStudio's native
+    # endpoint, so a scored run records both without the operator declaring them.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v0/models"
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "mistral-small-24b",
+                        "quantization": "Q4_K_M",
+                        "arch": "mistral",
+                        "loaded_context_length": 8192,
+                    }
+                ]
+            },
+        )
+
+    d = LMStudioDecoder({"base_url": "http://x", "model": "mistral-small-24b"})
+    d._client = _mock_client(handler, "http://x")
+    info = d.model_info
+    assert info["quantization"] == "Q4_K_M"  # server-verified from the GGUF
+    assert info["arch"] == "mistral"
+    assert info["served_context_length"] == 8192  # catches the silent-downgrade case
+
+
+def test_lmstudio_model_info_selects_loaded_entry_when_model_unset() -> None:
+    # require_model=False means "decode whatever is loaded"; /api/v0/models lists EVERY
+    # downloaded model and is not ordered loaded-first. Provenance must describe the LOADED
+    # entry (via `state`), not the first, else it records a different model's precision.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v0/models"
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "other",
+                        "state": "not-loaded",
+                        "quantization": "Q8_0",
+                        "loaded_context_length": 4096,
+                    },
+                    {
+                        "id": "live",
+                        "state": "loaded",
+                        "quantization": "Q4_K_M",
+                        "loaded_context_length": 8192,
+                    },
+                ]
+            },
+        )
+
+    d = LMStudioDecoder({"base_url": "http://x"})  # no model configured
+    d._client = _mock_client(handler, "http://x")
+    info = d.model_info
+    assert info["quantization"] == "Q4_K_M"  # the LOADED entry, not the first
+    assert info["served_context_length"] == 8192
+    assert info["state"] == "loaded"  # recorded for audit
+
+
+def test_model_info_retries_after_transient_blip() -> None:
+    # The server half must NOT be memoized on failure. The MATH runner snapshots model_info
+    # BEFORE the first decode; a blip at that instant must not permanently strip
+    # served_context_length from the whole capture -- the next access must recover it.
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectError("blip")
+        return httpx.Response(200, json={"data": [{"id": "m", "max_model_len": 32768}]})
+
+    d = VLLMDecoder({"base_url": "http://x", "model": "m", "quantization": "none"})
+    d._client = _mock_client(handler, "http://x")
+    first = d.model_info
+    assert "served_context_length" not in first  # blip -> declared only, not cached
+    assert first["quantization"] == "none"
+    second = d.model_info
+    assert second["served_context_length"] == 32768  # recovered on retry
+
+
+def test_finish_reason_captured_and_cleared() -> None:
+    # "length" = truncated at the cap; captured per turn so a cut-off trace is not misread as
+    # a wrong answer, and cleared on a raising request so it does not bleed into the next turn.
+    def length(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "partial"}, "finish_reason": "length"}]}
+        )
+
+    d = VLLMDecoder({"base_url": "http://x", "model": "m"})
+    d._client = _mock_client(length, "http://x")
+    d.complete("q")
+    assert d.last_finish_reason == "length"
+
+    d._client = _mock_client(lambda r: httpx.Response(400, json={"e": 1}), "http://x")
+    with pytest.raises(httpx.HTTPStatusError):
+        d.complete("too big")
+    assert d.last_finish_reason == ""  # stale "length" cleared

@@ -139,6 +139,12 @@ class _FakeDecoder:
         self.last_reasoning = "chain of thought"
         self.last_usage = {"prompt_tokens": 5, "completion_tokens": 7}
         self.model = "fake"
+        self.model_info = {
+            "backend": "fake",
+            "quantization": "none",
+            "served_context_length": 32768,
+        }
+        self.last_finish_reason = "stop"
 
     def complete(self, prompt: str, *, sampler=None) -> str:  # type: ignore[no-untyped-def]
         return f"thinking... \\boxed{{{self._answer}}}"
@@ -172,6 +178,33 @@ def test_run_math_benchmark_grades_and_labels(tmp_path) -> None:  # type: ignore
     # reasoning + usage are carried through for the replay step
     assert turns[0].reasoning == "chain of thought"
     assert turns[0].completion_tokens == 7
+    # precision + served context are stamped on every row (self-describing capture)
+    assert turns[0].model_info["served_context_length"] == 32768
+    assert turns[0].model_info["quantization"] == "none"
+    assert turns[1].model_info == turns[0].model_info
+    # finish_reason -> per-turn truncation signal (a complete "stop" trace is not truncated)
+    assert turns[0].finish_reason == "stop"
+    assert by_level[2].outcome["truncated"] is False
+
+
+def test_run_math_benchmark_flags_truncated_traces(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # A trace cut off at the cap (finish_reason "length") emits no \boxed{} -> graded
+    # "incorrect", but outcome.truncated marks it so the floor-test analysis can exclude it
+    # rather than count it as a genuine wrong answer (the length confound).
+    _write_math(tmp_path, "Algebra", "1.json", problem="hard", level=5, solution=r"\boxed{42}")
+    problems = load_math_dir(tmp_path)
+
+    dec = _FakeDecoder("42")
+    dec.last_finish_reason = "length"  # truncated before the answer
+
+    def _no_answer(prompt: str, *, sampler=None) -> str:  # type: ignore[no-untyped-def]
+        return "thinking and thinking but never closes..."
+
+    dec.complete = _no_answer  # type: ignore[method-assign]
+    turns = run_math_benchmark(dec, problems, _MemCapture())
+    assert turns[0].outcome["correct"] is False
+    assert turns[0].outcome["truncated"] is True
+    assert turns[0].finish_reason == "length"
 
 
 def test_is_equiv_math_verify_fixes_notation() -> None:

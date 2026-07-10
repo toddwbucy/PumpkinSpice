@@ -17,6 +17,8 @@ from typing import Any
 
 import httpx
 
+from pumpkinspice.model_probe import fetch_model_entry
+
 # Greedy, reproducible decoding. A mismatch against the SPU side is a version or
 # sampler skew to pin before any scored run.
 GREEDY: dict[str, Any] = {
@@ -47,16 +49,13 @@ _MODEL_INFO_FIELDS = (
 
 def _model_info(client: httpx.Client, model: str | None) -> dict[str, Any] | None:
     """Record the loaded model's environment from LMStudio's native endpoint
-    (quantization, arch, context). Best-effort -- absent on non-LMStudio servers."""
-    try:
-        resp = client.get("/api/v0/models")
-        resp.raise_for_status()
-        for m in resp.json().get("data", []):
-            if not model or m.get("id") == model:
-                return {k: m.get(k) for k in _MODEL_INFO_FIELDS}
-    except Exception:
+    (quantization, arch, context). Best-effort -- absent on non-LMStudio servers.
+    Shares the query+match with the decoders' capture provenance (model_probe) so the
+    two sites cannot drift, and picks the `state`-loaded entry when model is unset."""
+    m = fetch_model_entry(client, "/api/v0/models", model)
+    if m is None:
         return None
-    return None
+    return {k: m.get(k) for k in _MODEL_INFO_FIELDS}
 
 
 def _decode(
