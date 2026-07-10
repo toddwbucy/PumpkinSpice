@@ -16,6 +16,7 @@ pumpkinspice serve                        run the web frontend API + SPA
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import tomllib
@@ -289,10 +290,8 @@ def _cmd_math_regrade(args: argparse.Namespace) -> int:
             os.fsync(fh.fileno())
         os.replace(tmp, out)
     except BaseException:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp)
-        except OSError:
-            pass
         raise
     log.info(
         "regraded %d rows: %d -> %d correct (%d flipped) -> %s",
