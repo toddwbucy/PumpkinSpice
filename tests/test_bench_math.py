@@ -188,10 +188,13 @@ def test_is_equiv_math_verify_fixes_notation() -> None:
     # genuinely different answers stay wrong; a missing extraction is never correct
     assert is_equiv("7", "8") is False
     assert is_equiv(None, "8") is False
-    # over-answer guard: an answer with EXTRA comma terms must NOT match a shorter gold
-    # (math-verify's set leniency would otherwise mark these correct -> false positive)
-    assert is_equiv("-1, 2", "2") is False
+    # comma-count guard, BOTH directions: math-verify's set leniency would mark an over-answer
+    # ("-1, 2" vs "2") OR an under-answer ("2" vs "-1, 2", gave 1 of 2 roots) correct -> both
+    # inflate correctness, so both must grade False.
+    assert is_equiv("-1, 2", "2") is False  # over-answer
     assert is_equiv(r"30^\circ, 45^\circ, 105^\circ", r"105^\circ") is False
+    assert is_equiv("2", "-1, 2") is False  # under-answer (the regression)
+    assert is_equiv("3", "1, 2, 3") is False
     # ...but thousands-separator commas in a plain number are exempt (they are not a list)
     assert is_equiv("1,000", "1000") is True
 
@@ -217,3 +220,33 @@ def test_regrade_rows_flips_only_stale_labels() -> None:
     assert rows[0]["outcome"]["correct"] is True
     assert rows[1]["outcome"]["correct"] is True
     assert rows[2]["outcome"]["correct"] is False
+
+
+def test_math_regrade_command_is_atomic_and_robust(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    pytest.importorskip("math_verify")
+    import argparse
+
+    from pumpkinspice.cli import _cmd_math_regrade
+
+    cap = tmp_path / "m.jsonl"
+    cap.write_text(
+        json.dumps(
+            {
+                "outcome": {
+                    "correct": False,
+                    "predicted": r"\begin{bmatrix} 0 & 0 \\ 0 & 1 \end{bmatrix}",
+                    "gold": r"\begin{pmatrix} 0 & 0 \\ 0 & 1 \end{pmatrix}",
+                }
+            }
+        )
+        + "\n"
+        + json.dumps({"outcome": None})  # non-dict outcome -> counters must not crash (#4)
+        + "\n"
+        + json.dumps({"world_state": {}})  # no outcome at all
+        + "\n"
+    )
+    rc = _cmd_math_regrade(argparse.Namespace(capture=str(cap), out=None))
+    assert rc == 0
+    out_rows = [json.loads(x) for x in cap.read_text().splitlines() if x.strip()]
+    assert len(out_rows) == 3  # all rows written back (atomic swap kept the file intact)
+    assert out_rows[0]["outcome"]["correct"] is True  # the genuine bmatrix flip applied

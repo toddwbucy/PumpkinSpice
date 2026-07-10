@@ -264,13 +264,14 @@ def _math_verify_equiv(a: str, b: str) -> bool:
     absent or cannot parse (a parse failure is just "not equivalent by this path", never a
     raise).
 
-    math-verify is LENIENT on lists/sets -- a prediction with EXTRA comma-separated terms can
-    match a shorter gold (e.g. "-1, 2" graded equal to "2"), which is a false POSITIVE (the
-    model over-answered). Reject that when the prediction has more comma-separated terms than
-    the gold, EXCEPT when both are plain numbers (the commas are thousands separators)."""
+    math-verify is LENIENT on lists/sets -- an OVER-answer ("-1, 2" vs "2", extra term) OR an
+    UNDER-answer ("2" vs "-1, 2", a subset of a multi-answer gold) can match, both false grades
+    (positive and negative-turned-positive) that inflate correctness. Reject ANY comma-count
+    MISMATCH in either direction, EXCEPT when both sides are plain numbers (the commas are then
+    thousands separators, not list separators)."""
     if not _HAS_MATH_VERIFY:
         return False
-    if a.count(",") > b.count(",") and not (
+    if a.count(",") != b.count(",") and not (
         _looks_like_plain_number(a) and _looks_like_plain_number(b)
     ):
         return False
