@@ -16,6 +16,7 @@ pumpkinspice serve                        run the web frontend API + SPA
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import tomllib
@@ -244,6 +245,61 @@ def _cmd_mathbench(
         len(turns),
         n_correct,
         100 * n_correct / max(len(turns), 1),
+    )
+    return 0
+
+
+def _cmd_math_regrade(args: argparse.Namespace) -> int:
+    """Re-grade a MATH capture JSONL with the current grader (math-verify), fixing correctness
+    labels WITHOUT re-decoding -- for when the grader improves after an expensive run."""
+    import tempfile
+
+    from .introspect import bench_math as bm
+
+    # The command's value IS the robust grader; without it, is_equiv silently falls back to
+    # string-only grading, which would REVERT the math-verify corrections this exists to make.
+    if not bm._HAS_MATH_VERIFY:
+        log.error("math-regrade needs math-verify: `uv sync --extra introspect` (it is absent)")
+        return 2
+
+    rows = [json.loads(ln) for ln in Path(args.capture).read_text().splitlines() if ln.strip()]
+    if not rows:
+        log.error("no rows in %s", args.capture)
+        return 2
+
+    def _n_correct(rs: list[dict[str, Any]]) -> int:
+        # mirror regrade_rows' tolerance of a non-dict outcome (a mixed/partial capture)
+        return sum(
+            1 for r in rs if isinstance(r.get("outcome"), dict) and r["outcome"].get("correct")
+        )
+
+    before = _n_correct(rows)
+    changed = bm.regrade_rows(rows)
+    after = _n_correct(rows)
+
+    out = Path(args.out or args.capture)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    # Atomic write: the capture holds irreplaceable reasoning traces, and the default overwrites
+    # it in place -- a truncate-then-write crash would destroy it. Write a sibling temp, fsync,
+    # then os.replace (atomic on the same filesystem).
+    fd, tmp = tempfile.mkstemp(dir=out.parent, prefix=out.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("".join(json.dumps(r) + "\n" for r in rows))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, out)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    log.info(
+        "regraded %d rows: %d -> %d correct (%d flipped) -> %s",
+        len(rows),
+        before,
+        after,
+        changed,
+        out,
     )
     return 0
 
@@ -589,6 +645,13 @@ def build_parser() -> argparse.ArgumentParser:
     mathp.add_argument("--limit", type=int, help="cap the number of problems")
     mathp.add_argument("--hard-level", type=int, default=4, help="level >= this counts as hard")
     mathp.set_defaults(func=_cmd_mathbench)
+
+    regradep = sub.add_parser(
+        "math-regrade", help="re-grade a MATH capture with math-verify (no re-decode)"
+    )
+    regradep.add_argument("capture", help="MATH capture .jsonl to re-grade")
+    regradep.add_argument("--out", "-o", help="output path (default: overwrite in place)")
+    regradep.set_defaults(func=_cmd_math_regrade)
 
     replayp = sub.add_parser(
         "replay-metrics", help="teacher-force replay captures into labeled metrics (needs 'replay')"
