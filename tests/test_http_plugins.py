@@ -461,6 +461,34 @@ def test_model_info_retries_after_transient_blip() -> None:
     assert second["served_context_length"] == 32768  # recovered on retry
 
 
+def test_decode_one_returns_result_without_touching_snapshot() -> None:
+    # decode_one is the concurrency-safe unit the batched runner fans out: it returns everything
+    # by value and must NOT mutate the shared last_* snapshot (which would race across threads).
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"content": "ans", "reasoning_content": "cot"},
+                        "finish_reason": "length",
+                    }
+                ],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 9},
+            },
+        )
+
+    d = VLLMDecoder({"base_url": "http://x", "model": "m"})
+    d._client = _mock_client(handler, "http://x")
+    res = d.decode_one("q")
+    assert res.content == "ans" and res.reasoning == "cot"
+    assert res.finish_reason == "length"
+    assert res.prompt_tokens == 3 and res.completion_tokens == 9
+    assert res.request["model"] == "m"  # decode provenance carried by value
+    # the sequential snapshot is UNTOUCHED -> safe to call concurrently
+    assert d.last_reasoning == "" and d.last_finish_reason == "" and d.last_request == {}
+
+
 def test_finish_reason_captured_and_cleared() -> None:
     # "length" = truncated at the cap; captured per turn so a cut-off trace is not misread as
     # a wrong answer, and cleared on a raising request so it does not bleed into the next turn.

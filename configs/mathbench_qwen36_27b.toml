@@ -3,7 +3,10 @@
 # -> max_tokens must let the <think> close and emit \boxed{}; --reasoning-parser puts the CoT
 # in the reasoning field (build_output still reconstructs the full trajectory for replay).
 #   pumpkinspice mathbench -c mathbench_qwen36_27b --data-dir ~/olympus/Data/benchmarks/math_json \
-#       --levels 3,4,5 --limit 150 -o captures/math_qwen36_27b.jsonl
+#       --levels 3,4,5 --limit 150 --concurrency 8 -o captures/math_qwen36_27b.jsonl
+# --concurrency > 1 fans problems out concurrently (vLLM batches them server-side), finishing a
+# single-pass set in a fraction of the sequential wall-clock; captures are written as each
+# completes (crash-safe). 1 = the old sequential path.
 
 [run]
 decoder   = "vllm"

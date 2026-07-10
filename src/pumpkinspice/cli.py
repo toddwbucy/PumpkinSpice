@@ -236,7 +236,24 @@ def _cmd_mathbench(
     problems = bm.load_math_dir(args.data_dir, levels=levels, limit=args.limit)
     log.info("MATH: %d problems -> %s", len(problems), args.out)
     try:
-        turns = bm.run_math_benchmark(decoder, problems, capture, hard_level=args.hard_level)
+        if args.concurrency > 1:
+            # Batched path: decode_one fanned out concurrently, vLLM batches server-side.
+            if not hasattr(decoder, "decode_one"):
+                log.error(
+                    "--concurrency %d needs a batching decoder (vllm/lmstudio); %r has none",
+                    args.concurrency,
+                    cfg.plugin_name("decoder"),
+                )
+                return 2
+            turns = bm.run_math_benchmark_batched(
+                decoder,
+                problems,
+                capture,
+                hard_level=args.hard_level,
+                max_concurrency=args.concurrency,
+            )
+        else:
+            turns = bm.run_math_benchmark(decoder, problems, capture, hard_level=args.hard_level)
     finally:
         capture.close()
     n_correct = sum(1 for t in turns if t.outcome.get("correct"))
@@ -644,6 +661,12 @@ def build_parser() -> argparse.ArgumentParser:
     mathp.add_argument("--levels", help="comma-separated difficulty levels to include (e.g. 3,4,5)")
     mathp.add_argument("--limit", type=int, help="cap the number of problems")
     mathp.add_argument("--hard-level", type=int, default=4, help="level >= this counts as hard")
+    mathp.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="decode this many problems at once (vLLM batches them); 1 = sequential",
+    )
     mathp.set_defaults(func=_cmd_mathbench)
 
     regradep = sub.add_parser(
