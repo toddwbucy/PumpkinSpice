@@ -41,3 +41,27 @@ class LMStudioDecoder(OpenAICompatDecoder):
     GREEDY: ClassVar[dict[str, Any]] = GREEDY
     # LMStudio decodes whatever model is loaded if `model` is omitted.
     require_model: ClassVar[bool] = False
+
+    def _discover_model_info(self) -> dict[str, Any]:
+        """LMStudio's native ``/api/v0/models`` reports the loaded GGUF's quantization and
+        the context length it actually loaded at -- so a pinned-GGUF scored run records both
+        without the operator declaring them (and a silent context downgrade is caught). Same
+        best-effort contract as the base: ``{}`` on any error. Server-verified fields win over
+        any declared ``quantization`` because they reflect what is really loaded."""
+        try:
+            resp = self._client.get("/api/v0/models")
+            resp.raise_for_status()
+            for m in resp.json().get("data", []):
+                if not self.model or m.get("id") == self.model:
+                    out: dict[str, Any] = {}
+                    if m.get("quantization") is not None:
+                        out["quantization"] = m["quantization"]
+                    if m.get("arch") is not None:
+                        out["arch"] = m["arch"]
+                    ctx = m.get("loaded_context_length")
+                    if ctx is not None:
+                        out["served_context_length"] = ctx
+                    return out
+        except Exception:  # provenance discovery must never break a run
+            return {}
+        return {}

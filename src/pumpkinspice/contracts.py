@@ -99,6 +99,14 @@ class Turn:
     # decode["max_tokens"] -- so runs are groupable by their decode settings post-hoc (empty
     # if the decoder does not expose `last_request`, e.g. the mock/echo decoders).
     decode: dict[str, Any] = field(default_factory=dict)
+    # The served model's ENVIRONMENT: precision (operator-declared `quantization`/`dtype`) and
+    # the context window it actually loaded at (server-verified). Distinct from `decode` (the
+    # request) and `model` (the id): precision is not on the wire, and a silent context
+    # downgrade is invisible without recording the served length (cf. the parity gate finding
+    # a model loaded at 8192, not the intended ~200k). Precision-sensitive analysis such as the
+    # #7/#8 trajectory geometry must be able to condition on it. Empty for decoders that do not
+    # expose `model_info` (mock/echo).
+    model_info: dict[str, Any] = field(default_factory=dict)
 
 
 # --- Plugin Protocols -------------------------------------------------------

@@ -67,6 +67,15 @@ class OpenAICompatDecoder:
         # a reasoning model writing a plan (Stage 2, turn 0) can think 5000+ tokens
         # -> minutes. Default 600s; a single timeout aborts the run, so err generous.
         self.timeout = float(config.get("timeout", 600.0))
+        # Served-model precision for capture provenance (Turn.model_info). vLLM's OpenAI
+        # endpoint does not report precision, so it is OPERATOR-DECLARED here: `quantization`
+        # (e.g. "none" for an unquantized checkpoint, or "Q4_K_M" for a GGUF) and `dtype`
+        # (e.g. "bfloat16"). The served context length is server-verified in `model_info`, not
+        # declared. The LMStudio subclass overrides discovery to read both from its native
+        # endpoint, so a pinned-GGUF scored run records quant without declaring it.
+        self.quantization = config.get("quantization")
+        self.dtype = config.get("dtype") or config.get("precision")
+        self._model_info: dict[str, Any] | None = None
         # The chain-of-thought from the most recent complete() (reasoning models
         # return it separately from the answer). Captured per turn by the loop.
         self.last_reasoning: str = ""
@@ -160,3 +169,46 @@ class OpenAICompatDecoder:
         # null -> "" so the empty case is detectable, not the string "None".
         content = message.get("content")
         return content if isinstance(content, str) else ""
+
+    @property
+    def model_info(self) -> dict[str, Any]:
+        """The served model's environment (precision + context window), for capture
+        provenance (Turn.model_info). Combines OPERATOR-DECLARED precision (config
+        ``quantization``/``dtype``) with SERVER-VERIFIED fields (the context length the
+        server actually loaded). Cached after the first access; best-effort, so a server
+        that does not expose model metadata just yields the declared fields (never raises,
+        never blocks a run)."""
+        if self._model_info is None:
+            info: dict[str, Any] = {"backend": self.name}
+            if self.model:
+                info["model"] = self.model
+            if self.quantization is not None:
+                info["quantization"] = self.quantization
+            if self.dtype is not None:
+                info["dtype"] = self.dtype
+            # Server-verified fields last so a real loaded context length is authoritative
+            # over anything declared (and so a silent downgrade is visible in the capture).
+            info.update(self._discover_model_info())
+            self._model_info = info
+        return self._model_info
+
+    def _discover_model_info(self) -> dict[str, Any]:
+        """Best-effort query of the served context window from the OpenAI-compatible
+        ``/v1/models`` endpoint. vLLM reports ``max_model_len``; record it as
+        ``served_context_length`` so the capture proves the run got the intended window
+        (cf. the parity gate finding a model silently loaded at 8192, not ~200k). Returns
+        ``{}`` on any error -- provenance is nice-to-have, never a run-breaker. LMStudio's
+        native quant/context live on a different endpoint (see the subclass override)."""
+        try:
+            resp = self._client.get("/v1/models")
+            resp.raise_for_status()
+            for m in resp.json().get("data", []):
+                if not self.model or m.get("id") == self.model:
+                    out: dict[str, Any] = {}
+                    ctx = m.get("max_model_len")
+                    if ctx is not None:
+                        out["served_context_length"] = ctx
+                    return out
+        except Exception:  # provenance discovery must never break a run
+            return {}
+        return {}

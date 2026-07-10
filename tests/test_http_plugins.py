@@ -327,3 +327,74 @@ def test_world_get_state_raises_with_context_after_retry(monkeypatch) -> None:
     world._client = httpx.Client(base_url="http://world", transport=httpx.MockTransport(handler))
     with pytest.raises(RuntimeError, match="after retry"):
         world.get_state()
+
+
+def test_vllm_model_info_declared_precision_and_served_context() -> None:
+    # vLLM's /v1/models exposes max_model_len but NOT precision, so precision is
+    # operator-declared (quantization/dtype) and the context window is server-verified.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/models"
+        return httpx.Response(
+            200, json={"data": [{"id": "Qwen/Qwen3.6-27B", "max_model_len": 32768}]}
+        )
+
+    d = VLLMDecoder(
+        {
+            "base_url": "http://x",
+            "model": "Qwen/Qwen3.6-27B",
+            "quantization": "none",
+            "dtype": "bfloat16",
+        }
+    )
+    d._client = _mock_client(handler, "http://x")
+    info = d.model_info
+    assert info["backend"] == "vllm"
+    assert info["model"] == "Qwen/Qwen3.6-27B"
+    assert info["quantization"] == "none"  # declared
+    assert info["dtype"] == "bfloat16"  # declared
+    assert info["served_context_length"] == 32768  # server-verified
+    # cached: a second access must not re-query (swap in a handler that would fail)
+    d._client = _mock_client(
+        lambda r: (_ for _ in ()).throw(AssertionError("re-queried")), "http://x"
+    )
+    assert d.model_info is info
+
+
+def test_model_info_is_best_effort_when_server_has_no_metadata() -> None:
+    # A server that 404s /v1/models must not break provenance: the declared fields survive,
+    # server-verified ones are simply absent.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": "nope"})
+
+    d = VLLMDecoder({"base_url": "http://x", "model": "m", "quantization": "none"})
+    d._client = _mock_client(handler, "http://x")
+    info = d.model_info
+    assert info["quantization"] == "none"
+    assert "served_context_length" not in info
+
+
+def test_lmstudio_model_info_reads_native_quant_and_context() -> None:
+    # The pinned-GGUF path discovers quantization + loaded context from LMStudio's native
+    # endpoint, so a scored run records both without the operator declaring them.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v0/models"
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "mistral-small-24b",
+                        "quantization": "Q4_K_M",
+                        "arch": "mistral",
+                        "loaded_context_length": 8192,
+                    }
+                ]
+            },
+        )
+
+    d = LMStudioDecoder({"base_url": "http://x", "model": "mistral-small-24b"})
+    d._client = _mock_client(handler, "http://x")
+    info = d.model_info
+    assert info["quantization"] == "Q4_K_M"  # server-verified from the GGUF
+    assert info["arch"] == "mistral"
+    assert info["served_context_length"] == 8192  # catches the silent-downgrade case

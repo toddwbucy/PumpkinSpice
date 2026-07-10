@@ -265,6 +265,7 @@ class AgentLoop:
             prompt_tokens=int(usage.get("prompt_tokens", 0)),
             completion_tokens=int(usage.get("completion_tokens", 0)),
             decode=decode,
+            model_info=dict(getattr(self.decoder, "model_info", {})),
         )
         self.capture.record(turn)
         self._turns.append(turn)

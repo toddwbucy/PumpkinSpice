@@ -1,0 +1,28 @@
+# MATH reasoning arm of the #7/#8 floor test, decoded by Qwen3.6-27B via vLLM (TP=2 across
+# both NVLinked A6000s on :8001). Same shape as mathbench_qwen3_{8b,14b}.toml. Thinking model
+# -> max_tokens must let the <think> close and emit \boxed{}; --reasoning-parser puts the CoT
+# in the reasoning field (build_output still reconstructs the full trajectory for replay).
+#   pumpkinspice mathbench -c mathbench_qwen36_27b --data-dir ~/olympus/Data/benchmarks/math_json \
+#       --levels 3,4,5 --limit 150 -o captures/math_qwen36_27b.jsonl
+
+[run]
+decoder   = "vllm"
+retrieval = "null"
+world     = "mock"
+prompt    = "default"
+capture   = "jsonl"
+
+[decoder]
+base_url   = "http://127.0.0.1:8001"
+model      = "Qwen/Qwen3.6-27B"
+# 0 = unbounded: vLLM lets the reasoning trace run to the FULL loaded 32k window instead of a
+# fixed cap. The earlier 16384 cap truncated ~57% of level-5 traces before they emitted
+# \boxed{}, which mislabels them "incorrect" in a way that correlates with length -- exactly the
+# length confound the floor test must rule out. The served window is recorded per-turn in
+# model_info.served_context_length so the capture proves it ran at 32768, not a silent downgrade.
+max_tokens = 0
+timeout    = 1800
+# Precision provenance (Turn.model_info). vLLM was launched with no --quantization/--dtype, so it
+# serves the native checkpoint: unquantized, 16-bit (52GB safetensors / 27B params ~= 2 bytes).
+quantization = "none"
+dtype        = "bfloat16"

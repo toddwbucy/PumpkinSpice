@@ -139,6 +139,11 @@ class _FakeDecoder:
         self.last_reasoning = "chain of thought"
         self.last_usage = {"prompt_tokens": 5, "completion_tokens": 7}
         self.model = "fake"
+        self.model_info = {
+            "backend": "fake",
+            "quantization": "none",
+            "served_context_length": 32768,
+        }
 
     def complete(self, prompt: str, *, sampler=None) -> str:  # type: ignore[no-untyped-def]
         return f"thinking... \\boxed{{{self._answer}}}"
@@ -172,6 +177,10 @@ def test_run_math_benchmark_grades_and_labels(tmp_path) -> None:  # type: ignore
     # reasoning + usage are carried through for the replay step
     assert turns[0].reasoning == "chain of thought"
     assert turns[0].completion_tokens == 7
+    # precision + served context are stamped on every row (self-describing capture)
+    assert turns[0].model_info["served_context_length"] == 32768
+    assert turns[0].model_info["quantization"] == "none"
+    assert turns[1].model_info == turns[0].model_info
 
 
 def test_is_equiv_math_verify_fixes_notation() -> None:

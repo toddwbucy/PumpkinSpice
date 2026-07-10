@@ -334,6 +334,9 @@ def run_math_benchmark(
     extracted ``predicted``/``gold`` for auditing. ``task_type`` is "reasoning".
     """
     turns: list[Turn] = []
+    # The served precision + context window are run-level, not per-turn; snapshot once and
+    # stamp every row so a capture is self-describing without a separate run header.
+    minfo = dict(getattr(decoder, "model_info", {}))
     for i, p in enumerate(problems):
         prompt = build_prompt(p.problem)
         raw = decoder.complete(prompt, sampler=sampler)
@@ -364,6 +367,7 @@ def run_math_benchmark(
             # Same decode provenance as the agent loop: the reasoning (MATH) arm must record
             # its IV too, else no-think and baseline math runs are indistinguishable.
             decode=dict(getattr(decoder, "last_request", {})),
+            model_info=minfo,
         )
         capture.record(turn)
         turns.append(turn)
