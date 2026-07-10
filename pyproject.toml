@@ -29,7 +29,7 @@ mcp = ["mcp>=1.0"]  # the MCP host for the agentic Chat (Phase 3a); optional
 # Offline trajectory-geometry metrics for the floor tests (issues #7, #8). numpy
 # only -- the heavy teacher-forced replay driver (torch/transformers) is the
 # separate `replay` extra below.
-introspect = ["numpy>=1.26"]
+introspect = ["numpy>=1.26", "math-verify>=0.5"]
 # Teacher-forced replay driver (issues #7, #8): loads a causal LM and reads its
 # hidden-state trajectory. torch is heavy; kept out of core. `gguf` lets the driver
 # dequantize the same GGUF the harness served. Large models may also want
@@ -156,6 +156,11 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 # scikit-learn is lazily imported by the evaluator and ships incomplete stubs.
 module = ["sklearn.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# math-verify (robust MATH grader) ships no py.typed marker.
+module = ["math_verify.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

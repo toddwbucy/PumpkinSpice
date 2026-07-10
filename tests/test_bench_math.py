@@ -172,3 +172,48 @@ def test_run_math_benchmark_grades_and_labels(tmp_path) -> None:  # type: ignore
     # reasoning + usage are carried through for the replay step
     assert turns[0].reasoning == "chain of thought"
     assert turns[0].completion_tokens == 7
+
+
+def test_is_equiv_math_verify_fixes_notation() -> None:
+    pytest.importorskip("math_verify")
+    # notation- and value-equivalent answers the string normalization alone marks WRONG
+    assert (
+        is_equiv(
+            r"\begin{bmatrix} 0 & 0 \\ 0 & 1 \end{bmatrix}",
+            r"\begin{pmatrix} 0 & 0 \\ 0 & 1 \end{pmatrix}",
+        )
+        is True
+    )
+    assert is_equiv("0.25", r"\frac{1}{4}") is True
+    # genuinely different answers stay wrong; a missing extraction is never correct
+    assert is_equiv("7", "8") is False
+    assert is_equiv(None, "8") is False
+    # over-answer guard: an answer with EXTRA comma terms must NOT match a shorter gold
+    # (math-verify's set leniency would otherwise mark these correct -> false positive)
+    assert is_equiv("-1, 2", "2") is False
+    assert is_equiv(r"30^\circ, 45^\circ, 105^\circ", r"105^\circ") is False
+    # ...but thousands-separator commas in a plain number are exempt (they are not a list)
+    assert is_equiv("1,000", "1000") is True
+
+
+def test_regrade_rows_flips_only_stale_labels() -> None:
+    pytest.importorskip("math_verify")
+    from pumpkinspice.introspect.bench_math import regrade_rows
+
+    rows = [
+        # a false NEGATIVE (equivalent notation graded wrong) -> flips to True
+        {
+            "outcome": {
+                "correct": False,
+                "predicted": r"\begin{bmatrix} 0 & 0 \\ 0 & 1 \end{bmatrix}",
+                "gold": r"\begin{pmatrix} 0 & 0 \\ 0 & 1 \end{pmatrix}",
+            }
+        },
+        {"outcome": {"correct": True, "predicted": "8", "gold": "8"}},  # already correct
+        {"outcome": {"correct": False, "predicted": "7", "gold": "8"}},  # genuinely wrong
+        {"world_state": {}},  # non-MATH row (no outcome dict) -> skipped, no crash
+    ]
+    assert regrade_rows(rows) == 1
+    assert rows[0]["outcome"]["correct"] is True
+    assert rows[1]["outcome"]["correct"] is True
+    assert rows[2]["outcome"]["correct"] is False

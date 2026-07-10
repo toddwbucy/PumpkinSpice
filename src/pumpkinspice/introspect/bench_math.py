@@ -10,9 +10,12 @@ Load MATH from a local directory of the standard release JSON (``{problem, level
 type, solution}`` files); no ``datasets`` dependency and no network, which also
 sidesteps the Hub takedown of the original repo. Point ``--data-dir`` at your copy.
 
-Grading is the canonical MATH approach: pull the last ``\\boxed{...}`` from the
-model output and from the gold solution, normalize both (fractions, sqrt, units,
-spacing), and compare -- string normalization, not sympy, matching lm-eval/Hendrycks.
+Grading pulls the last ``\\boxed{...}`` from the model output and the gold solution,
+then checks equivalence: first the canonical MATH string normalization (fractions,
+sqrt, units, spacing), then -- via the optional ``math-verify`` grader (``introspect``
+extra) -- LaTeX/sympy equivalence that repairs false-negatives the string match misses
+(bmatrix vs pmatrix, 1/4 vs 0.25), with a guard against math-verify's set leniency
+(over-answers like "-1, 2" vs "2"). Core-only installs fall back to string match alone.
 
 Pure/offline-testable: the loader, prompt, and grader are plain functions; the
 runner takes an injected Decoder and Capture, so tests use a fake decoder.
@@ -27,6 +30,18 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from pumpkinspice.contracts import Turn
+
+# Optional robust grader (sympy/LaTeX equivalence). The string normalization below misses
+# mathematically-equal answers (bmatrix vs pmatrix, 1/4 vs 0.25, reordered tuples), which
+# show up as false-NEGATIVE grades. math-verify closes most of that gap. Guarded so a
+# core-only install still grades (by string match alone); enable via the `introspect` extra.
+try:
+    from math_verify import parse as _mv_parse
+    from math_verify import verify as _mv_verify
+
+    _HAS_MATH_VERIFY = True
+except ImportError:  # pragma: no cover - exercised by the core-only CI matrix
+    _HAS_MATH_VERIFY = False
 
 # Level at/above which a MATH problem counts as "hard" for #7's difficulty label.
 DEFAULT_HARD_LEVEL = 4
@@ -234,13 +249,45 @@ def normalize_answer(s: str) -> str:
     return s
 
 
+_PLAIN_NUMBER_RE = re.compile(r"[-+]?[\d,]+(\.\d+)?")
+
+
+def _looks_like_plain_number(s: str) -> bool:
+    """A bare number, optionally with thousands-separator commas (so its commas are NOT list
+    separators): "1,000", "-42", "3.14". Used to exempt such answers from the over-answer guard."""
+    return bool(_PLAIN_NUMBER_RE.fullmatch(s.strip()))
+
+
+def _math_verify_equiv(a: str, b: str) -> bool:
+    """LaTeX/sympy equivalence via math-verify (handles notation/value equivalence the string
+    normalization misses: bmatrix vs pmatrix, 1/4 vs 0.25). Guarded: False if math-verify is
+    absent or cannot parse (a parse failure is just "not equivalent by this path", never a
+    raise).
+
+    math-verify is LENIENT on lists/sets -- a prediction with EXTRA comma-separated terms can
+    match a shorter gold (e.g. "-1, 2" graded equal to "2"), which is a false POSITIVE (the
+    model over-answered). Reject that when the prediction has more comma-separated terms than
+    the gold, EXCEPT when both are plain numbers (the commas are thousands separators)."""
+    if not _HAS_MATH_VERIFY:
+        return False
+    if a.count(",") > b.count(",") and not (
+        _looks_like_plain_number(a) and _looks_like_plain_number(b)
+    ):
+        return False
+    try:
+        return bool(_mv_verify(_mv_parse(b), _mv_parse(a)))
+    except Exception:
+        return False
+
+
 def is_equiv(a: str | None, b: str | None) -> bool:
-    # Deliberately stricter than canonical (which treats None==None as equivalent):
-    # here a missing extraction on either side is never a correct grade, so an
-    # unparseable answer cannot be scored right by accident.
+    # A missing extraction on either side is never a correct grade (an unparseable answer
+    # cannot be scored right by accident -- stricter than canonical MATH). Otherwise: the
+    # fast exact-normalized string match, then the robust math-verify equivalence, which
+    # fixes false-negatives the string match misses (bmatrix vs pmatrix, 1/4 vs 0.25).
     if a is None or b is None:
         return False
-    return normalize_answer(a) == normalize_answer(b)
+    return normalize_answer(a) == normalize_answer(b) or _math_verify_equiv(a, b)
 
 
 def grade(model_output: str, gold_solution: str) -> tuple[bool, str | None, str | None]:
@@ -249,6 +296,23 @@ def grade(model_output: str, gold_solution: str) -> tuple[bool, str | None, str 
     pred = strip_boxed(last_boxed_string(model_output))
     gold = strip_boxed(last_boxed_string(gold_solution))
     return is_equiv(pred, gold), pred, gold
+
+
+def regrade_rows(rows: list[dict[str, Any]]) -> int:
+    """Recompute each MATH capture row's ``outcome.correct`` from its stored ``predicted`` /
+    ``gold`` with the CURRENT grader. Returns the count of rows whose ``correct`` flag flipped.
+    Lets a grader improvement relabel captures WITHOUT re-decoding -- the model output (and its
+    extracted answers) are fixed; only the equivalence verdict changes."""
+    changed = 0
+    for r in rows:
+        oc = r.get("outcome")
+        if not isinstance(oc, dict):
+            continue
+        new = is_equiv(oc.get("predicted"), oc.get("gold"))
+        if bool(oc.get("correct")) != new:
+            oc["correct"] = new
+            changed += 1
+    return changed
 
 
 # --- runner -----------------------------------------------------------------

@@ -248,6 +248,32 @@ def _cmd_mathbench(
     return 0
 
 
+def _cmd_math_regrade(args: argparse.Namespace) -> int:
+    """Re-grade a MATH capture JSONL with the current grader (math-verify), fixing correctness
+    labels WITHOUT re-decoding -- for when the grader improves after an expensive run."""
+    from .introspect import bench_math as bm
+
+    rows = [json.loads(ln) for ln in Path(args.capture).read_text().splitlines() if ln.strip()]
+    if not rows:
+        log.error("no rows in %s", args.capture)
+        return 2
+    before = sum(1 for r in rows if r.get("outcome", {}).get("correct"))
+    changed = bm.regrade_rows(rows)
+    after = sum(1 for r in rows if r.get("outcome", {}).get("correct"))
+    out = args.out or args.capture
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    Path(out).write_text("".join(json.dumps(r) + "\n" for r in rows))
+    log.info(
+        "regraded %d rows: %d -> %d correct (%d flipped) -> %s",
+        len(rows),
+        before,
+        after,
+        changed,
+        out,
+    )
+    return 0
+
+
 def _cmd_replay_metrics(args: argparse.Namespace) -> int:  # pragma: no cover - needs a model
     """Teacher-force replay a capture JSONL into labeled trajectory-metrics JSONL."""
     from .introspect import pipeline
@@ -589,6 +615,13 @@ def build_parser() -> argparse.ArgumentParser:
     mathp.add_argument("--limit", type=int, help="cap the number of problems")
     mathp.add_argument("--hard-level", type=int, default=4, help="level >= this counts as hard")
     mathp.set_defaults(func=_cmd_mathbench)
+
+    regradep = sub.add_parser(
+        "math-regrade", help="re-grade a MATH capture with math-verify (no re-decode)"
+    )
+    regradep.add_argument("capture", help="MATH capture .jsonl to re-grade")
+    regradep.add_argument("--out", "-o", help="output path (default: overwrite in place)")
+    regradep.set_defaults(func=_cmd_math_regrade)
 
     replayp = sub.add_parser(
         "replay-metrics", help="teacher-force replay captures into labeled metrics (needs 'replay')"
