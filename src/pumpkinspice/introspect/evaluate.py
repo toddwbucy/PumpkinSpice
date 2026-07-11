@@ -83,6 +83,10 @@ class LabeledTurn:
     # trajectories leak across CV folds -- the probe must find a difficulty signature that
     # GENERALIZES to held-out tasks, not memorize one. "" = ungrouped (falls back to plain CV).
     group: str = ""
+    # Raw difficulty level (MATH 1-5; 0 if N/A). The reasoning-arm difficulty probe uses the
+    # EXTREMES (1 vs 5) per arXiv:2607.01571, which the binary `hard` flag alone cannot express
+    # (it would lump level 3 with level 1). 0 for the agentic arm, which has no per-turn level.
+    level: int = 0
 
 
 def kinematic_features(m: TrajectoryMetrics) -> Array:
@@ -118,17 +122,20 @@ def _cv_probe_auc(
     seed: int = 0,
     c: float = 1.0,
     groups: Sequence[str] | None = None,
+    leave_one_group_out: bool = False,
 ) -> float | None:
     """Pooled out-of-fold cross-validated AUC of an L2 logistic probe.
 
-    When ``groups`` has >= 2 distinct values, folds are GROUPED (StratifiedGroupKFold): no
-    group's samples straddle train/test, so the probe cannot memorize a task and must
-    generalize to held-out groups (the Confound-A deconfound for the difficulty kill). The
-    fold count is then bounded by the minority class's distinct-group count, not its sample
-    count. Otherwise plain stratified CV.
+    When ``groups`` has >= 2 distinct values, folds are GROUPED: no group's samples straddle
+    train/test, so the probe cannot memorize a task and must generalize to held-out groups (the
+    Confound-A deconfound). ``leave_one_group_out`` uses LeaveOneGroupOut (each group held out
+    once -- the paper's leave-one-QUESTION-out protocol; the pooled OOF AUC is well defined even
+    though each single-group test fold is one class); otherwise StratifiedGroupKFold with the
+    fold count bounded by the minority class's distinct-group count. Without groups, plain
+    stratified CV.
 
     Returns None when the AUC is undefined: one class only, or too few per-class units for
-    >= 2 folds.
+    >= 2 folds (LOQO needs >= 2 groups per class so no training fold is single-class).
     """
     from sklearn.linear_model import LogisticRegression
     from sklearn.preprocessing import StandardScaler
@@ -138,16 +145,27 @@ def _cv_probe_auc(
         return None
 
     g = np.asarray(groups) if groups is not None else None
+    # LOQO must NOT silently degrade to plain CV: if leave-one-question-out is requested but the
+    # corpus is not grouped (< 2 distinct groups), refuse (return None) rather than leak
+    # same-question trajectories across folds -- which would inflate the AUC under a label that
+    # still claims "leave-one-question-out".
+    if leave_one_group_out and (g is None or np.unique(g).size < 2):
+        return None
     if g is not None and np.unique(g).size >= 2:
-        from sklearn.model_selection import StratifiedGroupKFold
-
-        # each fold needs >= 1 group per class -> bound folds by the min per-class GROUP count
+        # each (training) fold needs both classes -> require >= 2 groups per class
         per_class_groups = min(np.unique(g[y == cls]).size for cls in np.unique(y))
-        n_splits = min(folds, per_class_groups)
-        if n_splits < 2:
+        if per_class_groups < 2:
             return None
-        splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
-        split = splitter.split(features, y, groups=g)
+        if leave_one_group_out:
+            from sklearn.model_selection import LeaveOneGroupOut
+
+            split = LeaveOneGroupOut().split(features, y, groups=g)
+        else:
+            from sklearn.model_selection import StratifiedGroupKFold
+
+            n_splits = min(folds, per_class_groups)
+            splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+            split = splitter.split(features, y, groups=g)
     else:
         from sklearn.model_selection import StratifiedKFold
 
@@ -254,9 +272,10 @@ class LengthControl:
     length alone often predicts correctness/difficulty (harder/failing problems get more
     tokens). ``d_rho`` and the kinematics are length-sensitive, so a geometry AUC can be
     largely a length artifact. Three AUCs on the SAME labels (keyed in the report by task
-    type then kind, so ``geometry_auc`` is the corresponding probe's AUC -- but note a
-    difficulty entry exists for every task type while kill1 is registered only for the
-    agentic type, so a non-agentic difficulty entry maps to no kill):
+    type then kind, so ``geometry_auc`` is the corresponding probe's AUC). Which difficulty
+    entry backs a kill depends on the arm: the ``difficulty`` entry (binary hard, full corpus)
+    backs kill1 for the AGENTIC arm; the ``difficulty_1v5`` entry (extreme levels only) backs
+    kill1_drho_1v5 for any arm with both extremes (e.g. the reasoning arm):
       * ``geometry_auc``  -- the geometry features (kinematics for correctness, d_rho for
         difficulty),
       * ``length_auc``    -- the span length alone, a deterministic single-feature AUC,
@@ -287,10 +306,21 @@ class FloorTestReport:
     # task_type (kill #1 generalizes across these, so this -- not the episode count -- is the
     # number that bounds its reliability). 1 means ungrouped/single-task (kill #1 undefined).
     n_groups_by_type: dict[str, int]
+    # Distinct question-groups among the difficulty EXTREMES (the levels the 1-vs-5 probe uses) --
+    # the effective unit count for kill1_drho_1v5, which drops level 3, so it is <= n_groups_by_type
+    # and is the number that bounds the 1-vs-5 AUC's reliability.
+    n_1v5_groups_by_type: dict[str, int]
     n_layers: int | None
     # #7 diagnostics
     drho_hard_easy: dict[str, float | None]  # task_type -> probe AUC over d_rho features
+    # task_type -> d_rho 1-vs-5 difficulty AUC (paper protocol: extreme levels only,
+    # leave-one-question-out). None when a type lacks both extremes (e.g. the agentic arm).
+    drho_1v5: dict[str, float | None]
+    # per-threshold single-feature AUCs. drho_per_threshold decomposes drho_hard_easy (full
+    # corpus, binary hard); drho_1v5_per_threshold decomposes drho_1v5 (extreme subset, 1-vs-5)
+    # and is sparse -- present only for types where the 1-vs-5 probe was computed.
     drho_per_threshold: dict[str, dict[float, float | None]]
+    drho_1v5_per_threshold: dict[str, dict[float, float | None]]
     kinematics_correctness: dict[str, float | None]  # task_type -> CV probe AUC
     cross_transfer: dict[str, float | None]  # "A->B" -> AUC (geometry transfer)
     # length-confound control (issues #7): task_type -> kind ("correctness"/"difficulty")
@@ -312,6 +342,13 @@ class FloorTestReport:
             + ", ".join(f"{k}={v}" for k, v in self.n_groups_by_type.items())
         )
         lines.append(f"layers: {self.n_layers}")
+        if any(v is not None for v in self.drho_1v5.values()):
+            lines.append("")
+            lines.append("d_rho 1-vs-5 difficulty (leave-one-question-out):")
+            for ty, auc in self.drho_1v5.items():
+                if auc is not None:
+                    q = self.n_1v5_groups_by_type.get(ty, 0)
+                    lines.append(f"  {ty}: AUC={_fmt_auc(auc)} ({q} extreme-level questions)")
         lines.append("")
         lines.append("#7 kill conditions:")
         for kc in self.kills_hash7:
@@ -392,6 +429,36 @@ def _validate_corpus(turns: list[LabeledTurn]) -> None:
         )
 
 
+def _length_control(
+    feat_x: Array,
+    lengths: list[float],
+    labels: list[bool],
+    y: NDArray[np.int_],
+    geom: float | None,
+    *,
+    groups: Sequence[str] | None,
+    seed: int,
+    leave_one_group_out: bool = False,
+) -> LengthControl:
+    """Geometry vs length-only vs geometry+length AUC for one probe. The SINGLE place all three
+    length controls (correctness / difficulty / 1-vs-5) are built, so their shape and geom/label
+    pairing cannot drift. The combined probe uses the SAME grouping (and LOQO flag) as its
+    geometry probe, so length cannot smuggle task identity past the deconfound; length alone uses
+    the deterministic single-feature AUC (a CV probe on one column deflates it)."""
+    length_x = np.array([[x] for x in lengths])
+    return LengthControl(
+        geometry_auc=geom,
+        length_auc=_length_auc(lengths, labels),
+        combined_auc=_cv_probe_auc(
+            np.hstack([feat_x, length_x]),
+            y,
+            seed=seed,
+            groups=groups,
+            leave_one_group_out=leave_one_group_out,
+        ),
+    )
+
+
 def evaluate_floor_test(
     turns: list[LabeledTurn],
     *,
@@ -399,8 +466,13 @@ def evaluate_floor_test(
     threshold: float = DEFAULT_KILL_THRESHOLD,
     flat_range: float = DEFAULT_FLAT_RANGE,
     seed: int = 0,
+    difficulty_levels: tuple[int, int] = (1, 5),
 ) -> FloorTestReport:
-    """Compute the #7 AUC kills and the #8 rho-curve diagnostic from labeled turns."""
+    """Compute the #7 AUC kills and the #8 rho-curve diagnostic from labeled turns.
+
+    ``difficulty_levels`` are the (easy, hard) extremes for the reasoning-arm difficulty probe
+    (arXiv:2607.01571 uses 1 vs 5): d_rho separating those two levels, leave-one-question-out.
+    """
     if not turns:
         raise ValueError("no turns to evaluate")
     _validate_corpus(turns)
@@ -408,9 +480,13 @@ def evaluate_floor_test(
     n_by_type = {ty: len(v) for ty, v in grouped.items()}
     n_groups_by_type = {ty: len({t.group for t in v}) for ty, v in grouped.items()}
     thresholds = sorted(turns[0].metrics.d_rho)
+    easy_lvl, hard_lvl = difficulty_levels
 
     drho_probe: dict[str, float | None] = {}
+    drho_1v5: dict[str, float | None] = {}
+    n_1v5_groups_by_type: dict[str, int] = {}
     drho_pt: dict[str, dict[float, float | None]] = {}
+    drho_1v5_pt: dict[str, dict[float, float | None]] = {}  # sparse: only types where 1v5 ran
     kin_probe: dict[str, float | None] = {}
     length_control: dict[str, dict[str, LengthControl]] = {}
     for ty, group in grouped.items():
@@ -421,35 +497,69 @@ def evaluate_floor_test(
         # DIFFICULTY (kill #1) groups by TASK so no task leaks across folds (Confound A);
         # CORRECTNESS (kill #2) is per-episode, so each episode is its own unit (plain CV).
         task_groups = [t.group for t in group]
-        # generation length the trajectory spanned (span-aware), as a 1-column feature
         lengths = [_length_of(t.metrics) for t in group]
-        length_x = np.array([[x] for x in lengths])
         drho_x = np.array([drho_features(t.metrics) for t in group])
+        kin_x = np.array([kinematic_features(t.metrics) for t in group])
         drho_probe[ty] = _cv_probe_auc(drho_x, yh, seed=seed, groups=task_groups)
+        kin_probe[ty] = _cv_probe_auc(kin_x, yc, seed=seed)
+
+        # 1-vs-5 difficulty (arXiv:2607.01571): the difficulty EXTREMES only (drop "medium"
+        # level 3, which the binary `hard` flag would lump with easy), labeled by the hard
+        # extreme, leave-one-QUESTION-out. Needs both extremes with >= 2 questions each (else
+        # None -- e.g. the agentic arm has no per-turn level). The per-threshold decomposition
+        # and length control below use the SAME extreme subset+label, and only when the probe
+        # actually ran (so there is no orphan length control with a length AUC but no geometry).
+        extreme = [t for t in group if t.level in (easy_lvl, hard_lvl)]
+        n_1v5_groups_by_type[ty] = len({t.group for t in extreme})
+        drho_1v5[ty] = None
+        ex_lc: LengthControl | None = None
+        if len({t.level for t in extreme}) >= 2:
+            ex_x = np.array([drho_features(t.metrics) for t in extreme])
+            ex_hard = [t.level == hard_lvl for t in extreme]
+            ex_y = np.asarray(ex_hard, dtype=int)
+            ex_g = [t.group for t in extreme]
+            ex_len = [_length_of(t.metrics) for t in extreme]
+            auc = _cv_probe_auc(ex_x, ex_y, seed=seed, groups=ex_g, leave_one_group_out=True)
+            drho_1v5[ty] = auc
+            if auc is not None:
+                # per-threshold decomposition of the 1-vs-5 headline (its OWN subset+label)
+                drho_1v5_pt[ty] = {
+                    rho: _single_feature_auc(
+                        [float(t.metrics.d_rho[rho]) for t in extreme], ex_hard
+                    )
+                    for rho in thresholds
+                }
+                ex_lc = _length_control(
+                    ex_x,
+                    ex_len,
+                    ex_hard,
+                    ex_y,
+                    auc,
+                    groups=ex_g,
+                    seed=seed,
+                    leave_one_group_out=True,
+                )
+
+        # Per-threshold single-feature AUCs of the FULL-corpus binary-hard difficulty probe --
+        # the decomposition OF drho_hard_easy[ty], so the two always describe the same subset+
+        # label. The 1-vs-5 headline has its own drho_1v5_per_threshold (set above) so neither
+        # can be misread as the other's breakdown.
         drho_pt[ty] = {
             rho: _single_feature_auc([float(t.metrics.d_rho[rho]) for t in group], hard)
             for rho in thresholds
         }
-        kin_x = np.array([kinematic_features(t.metrics) for t in group])
-        kin_probe[ty] = _cv_probe_auc(kin_x, yc, seed=seed)
-        # Does the geometry beat length? Same shape for both kinds (one place, so a future
-        # edit can't silently swap the labels/features of one copy). The combined probe uses
-        # the SAME grouping as its geometry probe -- grouped by task for difficulty, plain for
-        # correctness -- so length cannot smuggle task identity past the deconfound. Length
-        # uses the deterministic single-feature AUC (a CV probe on one column deflates it).
+
+        # Does geometry beat length? Built in one place (_length_control) for every kind.
         length_control[ty] = {
-            kind: LengthControl(
-                geometry_auc=geom,
-                length_auc=_length_auc(lengths, labels),
-                combined_auc=_cv_probe_auc(
-                    np.hstack([feat_x, length_x]), yarr, seed=seed, groups=grp
-                ),
-            )
-            for kind, feat_x, labels, yarr, geom, grp in (
-                ("correctness", kin_x, correct, yc, kin_probe[ty], None),
-                ("difficulty", drho_x, hard, yh, drho_probe[ty], task_groups),
-            )
+            "correctness": _length_control(
+                kin_x, lengths, correct, yc, kin_probe[ty], groups=None, seed=seed
+            ),
+            "difficulty": _length_control(
+                drho_x, lengths, hard, yh, drho_probe[ty], groups=task_groups, seed=seed
+            ),
         }
+        if ex_lc is not None:
+            length_control[ty]["difficulty_1v5"] = ex_lc
 
     cross: dict[str, float | None] = {}
     cross_length: dict[str, float | None] = {}
@@ -469,16 +579,19 @@ def evaluate_floor_test(
             lb = np.array([[_length_of(t.metrics)] for t in grouped[b]])
             cross_length[f"{a}->{b}"] = _transfer_auc(la, ya, lb, yb)
 
-    kills = _build_kills(agentic_type, threshold, drho_probe, kin_probe, cross)
+    kills = _build_kills(agentic_type, threshold, drho_probe, drho_1v5, kin_probe, cross)
     rho_curves = _summarize_rho(turns, flat_range)
     n_layers = turns[0].metrics.n_layers
 
     return FloorTestReport(
         n_by_type=n_by_type,
         n_groups_by_type=n_groups_by_type,
+        n_1v5_groups_by_type=n_1v5_groups_by_type,
         n_layers=n_layers,
         drho_hard_easy=drho_probe,
+        drho_1v5=drho_1v5,
         drho_per_threshold=drho_pt,
+        drho_1v5_per_threshold=drho_1v5_pt,
         kinematics_correctness=kin_probe,
         cross_transfer=cross,
         length_control=length_control,
@@ -492,6 +605,7 @@ def _build_kills(
     agentic_type: str,
     threshold: float,
     drho_probe: dict[str, float | None],
+    drho_1v5: dict[str, float | None],
     kin_probe: dict[str, float | None],
     cross: dict[str, float | None],
 ) -> list[KillCheck]:
@@ -500,7 +614,7 @@ def _build_kills(
         return KillCheck(name=name, auc=auc, threshold=threshold, passed=passed, note=note)
 
     kills: list[KillCheck] = []
-    # Kill #1 is defined on agentic (non-math) trajectories specifically.
+    # Kill #1 (agentic): d_rho separates hard/easy on the agentic arm (binary tier difficulty).
     if agentic_type in drho_probe:
         kills.append(check(f"kill1_drho_hard_easy[{agentic_type}]", drho_probe[agentic_type]))
     else:
@@ -513,6 +627,11 @@ def _build_kills(
                 note=f"no '{agentic_type}' turns",
             )
         )
+    # Kill #1 (reasoning): d_rho separates the 1-vs-5 difficulty extremes on any arm that has
+    # them (the paper's MATH difficulty result, AUC ~0.93). Registered per type with a 1-vs-5 AUC.
+    for ty, auc in drho_1v5.items():
+        if auc is not None:
+            kills.append(check(f"kill1_drho_1v5[{ty}]", auc))
     # Kill #2: within each task type.
     for ty, auc in kin_probe.items():
         kills.append(check(f"kill2_kinematics_correctness[{ty}]", auc))
@@ -600,6 +719,7 @@ def labeled_turn_to_dict(t: LabeledTurn) -> dict[str, Any]:
         "correct": t.correct,
         "hard": t.hard,
         "group": t.group,
+        "level": t.level,
         "metrics": metrics_to_dict(t.metrics),
     }
 
@@ -611,6 +731,7 @@ def labeled_turn_from_dict(d: dict[str, Any]) -> LabeledTurn:
         hard=bool(d["hard"]),
         metrics=metrics_from_dict(d["metrics"]),
         group=str(d.get("group", "")),  # absent in pre-grouped-CV metric files -> ungrouped
+        level=int(d.get("level", 0)),  # absent in pre-1v5 metric files -> 0 (no level)
     )
 
 
@@ -628,10 +749,15 @@ def report_to_dict(r: FloorTestReport) -> dict[str, Any]:
     return {
         "n_by_type": r.n_by_type,
         "n_groups_by_type": r.n_groups_by_type,
+        "n_1v5_groups_by_type": r.n_1v5_groups_by_type,
         "n_layers": r.n_layers,
         "drho_hard_easy": r.drho_hard_easy,
+        "drho_1v5": r.drho_1v5,
         "drho_per_threshold": {
             ty: {str(k): v for k, v in d.items()} for ty, d in r.drho_per_threshold.items()
+        },
+        "drho_1v5_per_threshold": {
+            ty: {str(k): v for k, v in d.items()} for ty, d in r.drho_1v5_per_threshold.items()
         },
         "kinematics_correctness": r.kinematics_correctness,
         "cross_transfer": r.cross_transfer,
