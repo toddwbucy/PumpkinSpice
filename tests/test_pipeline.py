@@ -102,6 +102,43 @@ def test_replay_captures_writes_labeled_metrics(tmp_path) -> None:  # type: igno
     assert set(turns[0].metrics.d_rho) == {0.5, 0.75, 0.9}
 
 
+def test_replay_captures_group_by_task(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # Multi-sample MATH: many trajectories share one file but each belongs to a different
+    # question -> group_by="task" must stamp each row with its own task id (empty -> file group).
+    caps = tmp_path / "caps.jsonl"
+    rows = [
+        _capture_row(task="q1"),
+        _capture_row(task="q2", outcome={"task_type": "reasoning", "correct": False, "hard": True}),
+        _capture_row(task=""),  # missing task -> falls back to the file group ("caps")
+    ]
+    caps.write_text("\n".join(json.dumps(r) for r in rows))
+
+    model = ReplayModel(_tiny_model(), tokenizer=_FakeTok())
+    out = tmp_path / "labeled.jsonl"
+    replay_captures(model, caps, out, group_by="task")
+    model.close()
+
+    turns = load_labeled_turns(out)
+    assert [t.group for t in turns] == ["q1", "q2", "caps"]  # per-question; empty -> file group
+    # default (no group_by) still stamps the single file-level group on every row
+    out2 = tmp_path / "labeled2.jsonl"
+    model = ReplayModel(_tiny_model(), tokenizer=_FakeTok())
+    replay_captures(model, caps, out2)
+    model.close()
+    assert {t.group for t in load_labeled_turns(out2)} == {"caps"}
+
+
+def test_replay_model_custom_rho_thresholds(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # The paper uses d_rho variance thresholds 0.90/0.95/0.99 (not the repo default 0.5/0.75/0.9).
+    caps = tmp_path / "caps.jsonl"
+    caps.write_text(json.dumps(_capture_row()))
+    model = ReplayModel(_tiny_model(), tokenizer=_FakeTok(), rho_thresholds=(0.9, 0.95, 0.99))
+    out = tmp_path / "labeled.jsonl"
+    replay_captures(model, caps, out)
+    model.close()
+    assert set(load_labeled_turns(out)[0].metrics.d_rho) == {0.9, 0.95, 0.99}
+
+
 def test_replay_captures_skips_prompt_token_drift(tmp_path) -> None:  # type: ignore[no-untyped-def]
     # "hello world" re-derives to 11 prompt tokens via _FakeTok (1 token/char).
     caps = tmp_path / "caps.jsonl"

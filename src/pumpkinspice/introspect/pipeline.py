@@ -78,6 +78,7 @@ def replay_captures(
     label_fn: LabelFn = labels_from_outcome,
     output_fn: OutputFn = build_output,
     group: str | None = None,
+    group_by: str | None = None,
 ) -> tuple[int, int]:
     """Replay every capture and write labeled-metrics rows. Returns (written, skipped). A turn
     is skipped (not fatal) when its forced continuation is too short for a trajectory
@@ -90,11 +91,17 @@ def replay_captures(
     name without ``__`` groups by the whole stem). To evaluate v2, replay each episode capture
     (its per-episode ``label_fn`` scores that episode's outcome) and CONCATENATE the metrics --
     every row already carries its task group, so grouped CV sees all tasks. The per-file
-    labeling + concatenation orchestration is v2 run-workflow (step 7)."""
+    labeling + concatenation orchestration is v2 run-workflow (step 7).
+
+    ``group_by="task"`` instead stamps each row with ITS OWN turn's ``task`` (the question/
+    problem id for the multi-sample MATH arm, where many trajectories share one capture file
+    but each belongs to a different question), so grouped CV holds whole QUESTIONS out -- the
+    correctness protocol of arXiv:2607.01571. A row missing ``task`` falls back to the file
+    group. Default (None / "filename") keeps the file-level group above."""
     # Read (and parse) the input fully BEFORE truncating the output, so a missing or
     # corrupt captures path does not destroy a previous good metrics file.
     turns = _read_jsonl(captures_path)
-    grp = group if group is not None else Path(captures_path).stem.split("__")[0]
+    file_grp = group if group is not None else Path(captures_path).stem.split("__")[0]
     written = 0
     skipped = 0
     with Path(out_path).open("w", encoding="utf-8") as w:
@@ -127,6 +134,8 @@ def replay_captures(
                 skipped += 1
                 continue
             task_type, correct, hard = label_fn(turn)
+            # Per-question grouping (multi-sample MATH): the row's own task id, else the file group.
+            grp = str(turn.get("task")) if (group_by == "task" and turn.get("task")) else file_grp
             row = labeled_turn_to_dict(LabeledTurn(task_type, correct, hard, metrics, group=grp))
             w.write(json.dumps(row) + "\n")
             written += 1
