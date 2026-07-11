@@ -84,6 +84,63 @@ def _corpus(
     return turns
 
 
+def _reasoning_levels_corpus(
+    *, per_level_questions: int = 4, samples_per_q: int = 5, seed: int = 0
+) -> list[LabeledTurn]:
+    """MATH-shaped: questions at levels 1/3/5, several trajectories each (grouped by question),
+    with d_rho tracking level (5 high, 3 medium, 1 low). The 1-vs-5 probe must separate the
+    extremes with level 3 excluded."""
+    rng = np.random.default_rng(seed)
+    turns: list[LabeledTurn] = []
+    q = 0
+    for level in (1, 3, 5):
+        base = {1: 1, 3: 3, 5: 5}[level]
+        for _ in range(per_level_questions):
+            q += 1
+            for _s in range(samples_per_q):
+                dval = int(rng.integers(base, base + 2))
+                turns.append(
+                    LabeledTurn(
+                        "reasoning",
+                        bool(rng.random() < 0.5),
+                        level >= 4,
+                        _metrics(mean_speed=1.0, drho=(dval, dval, dval)),
+                        group=f"q{q}",
+                        level=level,
+                    )
+                )
+    return turns
+
+
+def test_drho_1v5_difficulty_probe() -> None:
+    from pumpkinspice.introspect.evaluate import report_to_dict
+
+    report = evaluate_floor_test(_reasoning_levels_corpus(), difficulty_levels=(1, 5))
+    # d_rho separates the 1-vs-5 extremes (level 3 excluded), leave-one-question-out
+    assert report.drho_1v5["reasoning"] is not None and report.drho_1v5["reasoning"] > 0.85
+    # registered as the reasoning-arm kill #1
+    k = next(k for k in report.kills_hash7 if k.name == "kill1_drho_1v5[reasoning]")
+    assert k.passed is True
+    # the length control on the 1-vs-5 subset is reported, and drho_1v5 serializes
+    assert "difficulty_1v5" in report.length_control["reasoning"]
+    assert "drho_1v5" in report_to_dict(report)
+
+
+def test_drho_1v5_absent_without_levels() -> None:
+    # the agentic arm has no per-turn level (0) -> no 1-vs-5 probe, no reasoning kill1
+    report = evaluate_floor_test(_corpus("tool_use", 40))
+    assert report.drho_1v5["tool_use"] is None
+    assert not any(k.name.startswith("kill1_drho_1v5") for k in report.kills_hash7)
+
+
+def test_labeled_turn_serializes_level() -> None:
+    t = LabeledTurn("reasoning", True, False, _metrics(mean_speed=1.0), group="q1", level=5)
+    d = labeled_turn_to_dict(t)
+    assert d["level"] == 5 and labeled_turn_from_dict(d).level == 5
+    d.pop("level")  # a pre-1v5 metrics row has no level -> 0
+    assert labeled_turn_from_dict(d).level == 0
+
+
 def test_kinematics_and_drho_aucs_are_high_when_separable() -> None:
     report = evaluate_floor_test(_corpus("tool_use", 60))
     assert report.n_by_type == {"tool_use": 60}

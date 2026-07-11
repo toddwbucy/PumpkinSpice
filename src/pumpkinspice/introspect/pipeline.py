@@ -136,7 +136,14 @@ def replay_captures(
             task_type, correct, hard = label_fn(turn)
             # Per-question grouping (multi-sample MATH): the row's own task id, else the file group.
             grp = str(turn.get("task")) if (group_by == "task" and turn.get("task")) else file_grp
-            row = labeled_turn_to_dict(LabeledTurn(task_type, correct, hard, metrics, group=grp))
+            # Raw difficulty level for the 1-vs-5 difficulty probe (0 when absent, e.g. HeroBench).
+            try:
+                level = int((turn.get("outcome") or {}).get("level") or 0)
+            except (TypeError, ValueError):
+                level = 0
+            row = labeled_turn_to_dict(
+                LabeledTurn(task_type, correct, hard, metrics, group=grp, level=level)
+            )
             w.write(json.dumps(row) + "\n")
             written += 1
     return written, skipped
