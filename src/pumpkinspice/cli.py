@@ -394,16 +394,23 @@ def _cmd_replay_metrics(args: argparse.Namespace) -> int:  # pragma: no cover - 
         )
     if args.device == "cpu" and dtype != "float32":
         log.warning("%s on CPU: some ops are unimplemented/slow for half precision", dtype)
+    # d_rho variance thresholds: the paper (arXiv:2607.01571) uses 0.90,0.95,0.99; default
+    # keeps the repo's 0.5,0.75,0.9. Parsed here and forwarded to the replay model.
+    extra: dict[str, Any] = {"trajectory_span": args.span}
+    if args.rho_thresholds:
+        extra["rho_thresholds"] = tuple(
+            float(x) for x in args.rho_thresholds.split(",") if x.strip()
+        )
     model = ReplayModel.from_pretrained(
         args.model,
         gguf_file=args.gguf,
         device=args.device,
         dtype=dtype,
-        trajectory_span=args.span,
+        **extra,
     )
     try:
         written, skipped = pipeline.replay_captures(
-            model, args.captures, args.out, label_fn=label_fn
+            model, args.captures, args.out, label_fn=label_fn, group_by=args.group_by
         )
     finally:
         model.close()
@@ -765,6 +772,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--herobench-tier",
         help="label as a HeroBench planning tier (control_gather/chicken_level2/"
         "copper_dagger/yellow_slime/weaponcrafting5); scores eventual correctness + difficulty",
+    )
+    replayp.add_argument(
+        "--rho-thresholds",
+        help="comma-separated d_rho variance thresholds, e.g. 0.90,0.95,0.99 "
+        "(default 0.5,0.75,0.9; the paper uses 0.90,0.95,0.99)",
+    )
+    replayp.add_argument(
+        "--group-by",
+        choices=["filename", "task"],
+        default="filename",
+        help="grouped-CV key: 'task' groups by each turn's question id (per-question CV for the "
+        "multi-sample MATH arm); 'filename' (default) by the capture file's task prefix",
     )
     replayp.set_defaults(func=_cmd_replay_metrics)
 
