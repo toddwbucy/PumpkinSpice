@@ -189,18 +189,18 @@ def _cv_probe_auc(
     folds: int = 5,
     seed: int = 0,
     c: float = 1.0,
-    class_weight: str | None = None,
     groups: Sequence[str] | None = None,
     leave_one_group_out: bool = False,
 ) -> float | None:
-    """Pooled out-of-fold ROC-AUC of a standardized L2 logistic probe (see ``_pooled_oof``)."""
+    """Pooled out-of-fold ROC-AUC of a standardized L2 logistic probe (see ``_pooled_oof``).
+    Its callers (kill1/kill2/kill3, length control) all use unbalanced class weights; the
+    balanced-weight correctness diagnostic reads ``_pooled_oof`` directly for AUC + AUPRC."""
     res = _pooled_oof(
         features,
         labels,
         folds=folds,
         seed=seed,
         c=c,
-        class_weight=class_weight,
         groups=groups,
         leave_one_group_out=leave_one_group_out,
     )
@@ -337,9 +337,11 @@ class CorrectnessResult:
     within_auprc: float | None
     cross_auc: float | None
     cross_auprc: float | None
-    # fraction of trajectories labeled correct -- the AUPRC base rate. AUPRC is
-    # prevalence-dependent, so within/cross AUPRC are only interpretable (and only comparable
-    # across types/runs/the paper) against this. None for an empty type.
+    # fraction of trajectories labeled correct -- the corpus prevalence, i.e. the AUPRC base
+    # rate. AUPRC is prevalence-dependent, so the AUPRCs are only interpretable against this.
+    # It is the EXACT base rate for within_auprc (pooled over all trajectories); for cross_auprc
+    # it is APPROXIMATE, since each 80/20 test split has its own prevalence around this mean.
+    # None for an empty type.
     positive_rate: float | None
 
 
@@ -410,7 +412,7 @@ class FloorTestReport:
                 lines.append(
                     f"  {ty}: within AUC={_fmt_auc(cr.within_auc)} AUPRC={_fmt_auc(cr.within_auprc)}"
                     f" | cross AUC={_fmt_auc(cr.cross_auc)} AUPRC={_fmt_auc(cr.cross_auprc)}"
-                    f" | correct-rate={base} (AUPRC base)"
+                    f" | correct-rate={base} (corpus prevalence; exact within-AUPRC base)"
                 )
         lines.append("")
         lines.append("#7 kill conditions:")
