@@ -32,10 +32,11 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from pumpkinspice.contracts import Turn
 
-from ..episode import stochastic_sampler
 from ..logging import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
     from pumpkinspice.plugins.decoder_openai_compat import DecodeResult
 
 log = get_logger("pumpkinspice.mathbench")
@@ -369,6 +370,26 @@ def regrade_rows(rows: list[dict[str, Any]]) -> int:
 # --- runner -----------------------------------------------------------------
 
 
+def _fan_out(
+    n: int,
+    decode: Callable[[int], DecodeResult],
+    *,
+    workers: int,
+) -> Iterator[tuple[int, DecodeResult | None, Exception | None]]:
+    """Run ``decode(i)`` for i in range(n) CONCURRENTLY, yielding ``(i, result, exc)`` in
+    completion order -- ``exc`` is set (and ``result`` None) iff that decode raised. The shared
+    executor skeleton for the batched and multi-sample MATH runners so their fan-out cannot
+    drift; each caller owns its own per-result handling (grading, drops, progress logging)."""
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(decode, i): i for i in range(n)}
+        for fut in as_completed(futures):
+            i = futures[fut]
+            try:
+                yield i, fut.result(), None
+            except Exception as exc:  # caller decides how to log + skip
+                yield i, None, exc
+
+
 def _math_turn(
     index: int,
     p: MathProblem,
@@ -414,6 +435,7 @@ def _math_turn(
         outcome["style"] = style
     if sample is not None:
         world_state["sample"] = sample
+        outcome["sample"] = sample
     return Turn(
         index=index,
         task=p.problem_id,
@@ -506,36 +528,35 @@ def run_math_benchmark_batched(
     failed = 0
     workers = max(1, min(max_concurrency, n or 1))
     log.info("MATH batched: %d problems, concurrency=%d", n, workers)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(decoder.decode_one, prompts[i], sampler): i for i in range(n)}
-        for fut in as_completed(futures):
-            i = futures[fut]
-            p = problems[i]
-            try:
-                res = fut.result()
-            except Exception as e:  # one bad decode must not abort the whole run
-                failed += 1
-                log.warning("MATH decode %d (%s L%d) failed, skipped: %s", i, p.subject, p.level, e)
-                continue
-            turn = _math_turn(
-                i,
-                p,
-                prompt=prompts[i],
-                raw=res.content,
-                reasoning=res.reasoning,
-                finish_reason=res.finish_reason,
-                prompt_tokens=res.prompt_tokens,
-                completion_tokens=res.completion_tokens,
-                request=dict(res.request),
-                model=model,
-                model_info=minfo,
-                hard_level=hard_level,
-            )
-            capture.record(turn)  # main-thread write -> single-writer, crash-safe, progressive
-            turns_by_index[i] = turn
-            done = len(turns_by_index)
-            if done % log_every == 0 or done + failed == n:
-                log.info("MATH batched: %d/%d decoded (%d failed)", done, n, failed)
+
+    def _decode(i: int) -> DecodeResult:
+        return decoder.decode_one(prompts[i], sampler)
+
+    for i, res, exc in _fan_out(n, _decode, workers=workers):
+        p = problems[i]
+        if exc is not None or res is None:  # one bad decode must not abort the whole run
+            failed += 1
+            log.warning("MATH decode %d (%s L%d) failed, skipped: %s", i, p.subject, p.level, exc)
+            continue
+        turn = _math_turn(
+            i,
+            p,
+            prompt=prompts[i],
+            raw=res.content,
+            reasoning=res.reasoning,
+            finish_reason=res.finish_reason,
+            prompt_tokens=res.prompt_tokens,
+            completion_tokens=res.completion_tokens,
+            request=dict(res.request),
+            model=model,
+            model_info=minfo,
+            hard_level=hard_level,
+        )
+        capture.record(turn)  # main-thread write -> single-writer, crash-safe, progressive
+        turns_by_index[i] = turn
+        done = len(turns_by_index)
+        if done % log_every == 0 or done + failed == n:
+            log.info("MATH batched: %d/%d decoded (%d failed)", done, n, failed)
     if failed:
         log.warning("MATH batched: %d/%d problems failed to decode and were skipped", failed, n)
     # Return in problem order (captures were written in completion order; each row self-indexes).
@@ -562,10 +583,13 @@ def run_math_multisample(
     so correctness has real variance to predict; and each Turn's group is the question
     (``Turn.task = problem_id``), so the evaluator can hold whole questions out.
 
-    Each (question, style, sample) is one job with a DISTINCT seed (reproducible). Jobs fan out
-    concurrently (vLLM batches them). A trajectory shorter than ``min_tokens`` completion tokens
-    is dropped as invalid (the paper's floor); a decode that raises is logged and skipped. Both
-    counts are logged (no silent loss). Captures are written as each completes (crash-safe).
+    Each (question, style, sample) is one job with a DISTINCT seed (reproducible). Sampling
+    overrides only temperature + seed; top_k / top_p come from the decoder config (vLLM's
+    defaults leave the distribution unmodified), so the paper's T=0.7-only spec is honored.
+    Jobs fan out concurrently (vLLM batches them). A trajectory shorter than ``min_tokens``
+    completion tokens is dropped as invalid (the paper's floor); a decode that raises is logged
+    and skipped. Both counts are logged (no silent loss). Captures are written as each completes
+    (crash-safe).
     """
     minfo = dict(getattr(decoder, "model_info", {}))
     model = str(getattr(decoder, "model", "") or "")
@@ -591,59 +615,58 @@ def run_math_multisample(
         workers,
     )
 
-    def _decode(job: tuple[int, str, int, int, str]) -> DecodeResult:
-        _pi, _style, _si, jseed, jprompt = job
-        return decoder.decode_one(jprompt, stochastic_sampler(temperature, jseed))
+    def _decode(k: int) -> DecodeResult:
+        # Faithful sampling: override ONLY temperature + seed. top_k / top_p come from the
+        # decoder config -- vLLM's greedy defaults are top_k=-1 ("all tokens") and top_p=1.0
+        # ("no nucleus"), so with the paper specifying only T this leaves the sampled
+        # distribution unmodified and never sends an out-of-range top_k=0.
+        _pi, _style, _si, jseed, jprompt = jobs[k]
+        return decoder.decode_one(jprompt, {"temperature": temperature, "seed": jseed})
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_decode, jobs[j]): j for j in range(n)}
-        for fut in as_completed(futures):
-            j = futures[fut]
-            pi, style, si, _seed, prompt = jobs[j]
-            p = problems[pi]
-            try:
-                res = fut.result()
-            except Exception as e:  # one bad decode must not abort the whole run
-                failed += 1
-                log.warning(
-                    "multisample q=%s style=%s sample=%d failed, skipped: %s",
-                    p.problem_id,
-                    style,
-                    si,
-                    e,
-                )
-                continue
-            if res.completion_tokens < min_tokens:
-                dropped += 1  # too-short trajectory is invalid (paper's floor)
-                continue
-            turn = _math_turn(
-                j,
-                p,
-                prompt=prompt,
-                raw=res.content,
-                reasoning=res.reasoning,
-                finish_reason=res.finish_reason,
-                prompt_tokens=res.prompt_tokens,
-                completion_tokens=res.completion_tokens,
-                request=dict(res.request),
-                model=model,
-                model_info=minfo,
-                hard_level=hard_level,
-                style=style,
-                sample=si,
+    for k, res, exc in _fan_out(n, _decode, workers=workers):
+        pi, style, si, _seed, prompt = jobs[k]
+        p = problems[pi]
+        if exc is not None or res is None:  # one bad decode must not abort the whole run
+            failed += 1
+            log.warning(
+                "multisample q=%s style=%s sample=%d failed, skipped: %s",
+                p.problem_id,
+                style,
+                si,
+                exc,
             )
-            capture.record(turn)
-            turns_by_index[j] = turn
-            kept = len(turns_by_index)
-            if kept % log_every == 0 or kept + failed + dropped == n:
-                log.info(
-                    "MATH multisample: %d kept, %d dropped(<%d tok), %d failed of %d",
-                    kept,
-                    dropped,
-                    min_tokens,
-                    failed,
-                    n,
-                )
+            continue
+        if res.completion_tokens < min_tokens:
+            dropped += 1  # too-short trajectory is invalid (paper's floor)
+            continue
+        turn = _math_turn(
+            k,
+            p,
+            prompt=prompt,
+            raw=res.content,
+            reasoning=res.reasoning,
+            finish_reason=res.finish_reason,
+            prompt_tokens=res.prompt_tokens,
+            completion_tokens=res.completion_tokens,
+            request=dict(res.request),
+            model=model,
+            model_info=minfo,
+            hard_level=hard_level,
+            style=style,
+            sample=si,
+        )
+        capture.record(turn)
+        turns_by_index[k] = turn
+        kept = len(turns_by_index)
+        if kept % log_every == 0 or kept + failed + dropped == n:
+            log.info(
+                "MATH multisample: %d kept, %d dropped(<%d tok), %d failed of %d",
+                kept,
+                dropped,
+                min_tokens,
+                failed,
+                n,
+            )
     if failed or dropped:
         log.warning(
             "MATH multisample: %d/%d trajectories dropped (short) and %d failed to decode",

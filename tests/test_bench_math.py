@@ -227,7 +227,10 @@ def test_run_math_multisample_per_trajectory(tmp_path) -> None:  # type: ignore[
             return httpx.Response(200, json={"data": [{"id": "m", "max_model_len": 4096}]})
         body = json.loads(request.content)
         seed = int(body.get("seed", 0))
-        assert body.get("temperature") == 0.7  # stochastic sampler wired through
+        # faithful sampling: only temperature+seed overridden; top_k/top_p come from vLLM's
+        # greedy defaults (all tokens / no nucleus) -- never the rejected top_k=0 or a 0.95 nucleus
+        assert body.get("temperature") == 0.7
+        assert body.get("top_k") == -1 and body.get("top_p") == 1
         ctok = 5 if seed == 0 else 50  # seed 0 -> too-short trajectory (dropped)
         ans = "4" if seed % 2 == 0 else "5"  # even seeds correct, odd wrong -> correctness varies
         return httpx.Response(
@@ -250,9 +253,10 @@ def test_run_math_multisample_per_trajectory(tmp_path) -> None:  # type: ignore[
     assert len(turns) == 5 and len(cap.turns) == 5
     # every trajectory groups on the QUESTION (for question-level held-out CV) ...
     assert all(t.task == problems[0].problem_id for t in turns)
-    # ... and records which style + sample it is
+    # ... and records which style + sample it is, symmetrically in world_state AND outcome
     assert {t.world_state["style"] for t in turns} <= {"medium", "long"}
-    assert all("sample" in t.world_state and "style" in t.outcome for t in turns)
+    assert all("sample" in t.world_state and "sample" in t.outcome for t in turns)
+    assert all("style" in t.world_state and "style" in t.outcome for t in turns)
     # distinct reproducible seeds per trajectory (provenance)
     assert len({t.decode.get("seed") for t in turns}) == 5
     # the whole point: correctness has variance to predict (a mix of right and wrong)

@@ -225,6 +225,29 @@ def _cmd_mathbench(
 
     cfg = load_config(args.config)
     decoder = kernel.load_plugin("decoder", cfg.plugin_name("decoder"), cfg.slot_config("decoder"))
+
+    # Validate settings BEFORE opening the output file, so an early return cannot leak the
+    # already-opened capture handle (and the user learns of a bad flag before anything runs).
+    needs_batch = args.samples > 0 or args.concurrency > 1
+    if needs_batch and not hasattr(decoder, "decode_one"):
+        log.error(
+            "batched/multi-sample decode needs a decode_one decoder (vllm/lmstudio); %r has none",
+            cfg.plugin_name("decoder"),
+        )
+        return 2
+    styles: tuple[str, ...] = ()
+    if args.samples > 0:
+        styles = tuple(s.strip() for s in args.styles.split(",") if s.strip())
+        if not styles:
+            log.error("--samples needs at least one --styles value (got %r)", args.styles)
+            return 2
+        if args.temperature <= 0:
+            log.error(
+                "multi-sample needs --temperature > 0 (T=0 makes every sample identical; "
+                "use --samples 0 for a single greedy pass)"
+            )
+            return 2
+
     # JsonlCapture appends: warn so a re-run does not silently concatenate a second
     # corpus into the same file (which would replay duplicates into the floor test).
     if Path(args.out).exists():
@@ -235,19 +258,13 @@ def _cmd_mathbench(
     levels = {int(x) for x in args.levels.split(",") if x.strip()} if args.levels else None
     problems = bm.load_math_dir(args.data_dir, levels=levels, limit=args.limit)
     log.info("MATH: %d problems -> %s", len(problems), args.out)
-    # Both the batched and multi-sample paths fan out decode_one; require it up front.
-    needs_batch = args.samples > 0 or args.concurrency > 1
-    if needs_batch and not hasattr(decoder, "decode_one"):
-        log.error(
-            "batched/multi-sample decode needs a decode_one decoder (vllm/lmstudio); %r has none",
-            cfg.plugin_name("decoder"),
-        )
-        return 2
     try:
         if args.samples > 0:
             # Multi-sample protocol (arXiv:2607.01571): N stochastic trajectories per
-            # (question, style) at a nonzero temperature, per-trajectory correctness labels.
-            styles = tuple(s.strip() for s in args.styles.split(",") if s.strip())
+            # (question, style), per-trajectory correctness labels. Default to a concurrent
+            # fan-out (a multi-sample run is thousands of decodes) unless the user pinned a
+            # specific --concurrency, so the safe default is not defeated by omitting it.
+            concurrency = args.concurrency if args.concurrency > 1 else 8
             turns = bm.run_math_multisample(
                 decoder,
                 problems,
@@ -257,7 +274,7 @@ def _cmd_mathbench(
                 temperature=args.temperature,
                 min_tokens=args.min_tokens,
                 hard_level=args.hard_level,
-                max_concurrency=args.concurrency,
+                max_concurrency=concurrency,
             )
         elif args.concurrency > 1:
             # Batched single-pass: decode_one fanned out concurrently, vLLM batches server-side.
@@ -272,6 +289,14 @@ def _cmd_mathbench(
             turns = bm.run_math_benchmark(decoder, problems, capture, hard_level=args.hard_level)
     finally:
         capture.close()
+    # A run that matched problems but produced no trajectory is a failure (every decode failed
+    # or was dropped), not a success -- do not exit 0 on a silently empty corpus.
+    if problems and not turns:
+        log.error(
+            "produced 0 trajectories from %d problems (all decodes failed/dropped; see warnings)",
+            len(problems),
+        )
+        return 1
     n_correct = sum(1 for t in turns if t.outcome.get("correct"))
     log.info(
         "decoded %d, correct %d (%.1f%%)",
