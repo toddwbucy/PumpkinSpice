@@ -187,6 +187,51 @@ def test_drho_1v5_no_orphan_length_control() -> None:
     assert "difficulty_1v5" not in report.length_control["reasoning"]  # no orphan control
 
 
+def _grouped_correctness_corpus(
+    *, n_questions: int = 10, samples_per_q: int = 8, seed: int = 0
+) -> list[LabeledTurn]:
+    """Questions with several trajectories each; correctness tracks mean_speed (so both the
+    within- and cross-question probes should separate it)."""
+    rng = np.random.default_rng(seed)
+    turns: list[LabeledTurn] = []
+    for q in range(n_questions):
+        for _ in range(samples_per_q):
+            correct = bool(rng.random() < 0.5)
+            mean_speed = float(rng.normal(5.0 if correct else 1.0, 0.4))
+            turns.append(
+                LabeledTurn(
+                    "reasoning", correct, False, _metrics(mean_speed=mean_speed), group=f"q{q}"
+                )
+            )
+    return turns
+
+
+def test_correctness_within_and_cross() -> None:
+    from pumpkinspice.introspect.evaluate import report_to_dict
+
+    report = evaluate_floor_test(_grouped_correctness_corpus())
+    cr = report.correctness["reasoning"]
+    # within-question (pooled 5-fold) and cross-question (grouped 80/20 x5) both separate, with AUPRC
+    assert cr.within_auc is not None and cr.within_auc > 0.85
+    assert cr.cross_auc is not None and cr.cross_auc > 0.85
+    assert cr.within_auprc is not None and cr.cross_auprc is not None
+    # AUPRC base rate recorded (prevalence-dependent metric); ~0.5 for this balanced corpus
+    assert cr.positive_rate is not None and 0.3 < cr.positive_rate < 0.7
+    # kill2 stays the PRE-REGISTERED probe (C=1.0), computed independently of the paper diagnostic
+    # (on this perfectly-separable corpus both classifiers reach the ceiling, so don't assert !=)
+    assert report.kinematics_correctness["reasoning"] is not None
+    assert next(k for k in report.kills_hash7 if k.name.startswith("kill2")).passed is True
+    assert report_to_dict(report)["correctness"]["reasoning"]["positive_rate"] is not None
+
+
+def test_correctness_cross_none_when_ungrouped() -> None:
+    # correctness tracks mean_speed but there are no question groups -> within defined, cross None
+    report = evaluate_floor_test(_corpus("tool_use", 40))  # group defaults to ""
+    cr = report.correctness["tool_use"]
+    assert cr.within_auc is not None
+    assert cr.cross_auc is None and cr.cross_auprc is None
+
+
 def test_drho_1v5_absent_without_levels() -> None:
     # the agentic arm has no per-turn level (0) -> no 1-vs-5 probe, no reasoning kill1
     report = evaluate_floor_test(_corpus("tool_use", 40))
