@@ -114,29 +114,27 @@ def drho_features(m: TrajectoryMetrics) -> Array:
 # --- probes -----------------------------------------------------------------
 
 
-def _cv_probe_auc(
+def _pooled_oof(
     features: Array,
     labels: NDArray[np.int_],
     *,
     folds: int = 5,
     seed: int = 0,
     c: float = 1.0,
+    class_weight: str | None = None,
     groups: Sequence[str] | None = None,
     leave_one_group_out: bool = False,
-) -> float | None:
-    """Pooled out-of-fold cross-validated AUC of an L2 logistic probe.
+) -> tuple[Array, NDArray[np.int_]] | None:
+    """The shared CV engine: the pooled out-of-fold predicted-probability array and its aligned
+    y (or None if undefined). ``_cv_probe_auc`` scores it with roc_auc; the correctness protocol
+    also reads it for AUPRC. Classifier: standardized L2 logistic (``c``, ``class_weight``).
 
     When ``groups`` has >= 2 distinct values, folds are GROUPED: no group's samples straddle
-    train/test, so the probe cannot memorize a task and must generalize to held-out groups (the
-    Confound-A deconfound). ``leave_one_group_out`` uses LeaveOneGroupOut (each group held out
-    once -- the paper's leave-one-QUESTION-out protocol; the pooled OOF AUC is well defined even
-    though each single-group test fold is one class); otherwise StratifiedGroupKFold with the
-    fold count bounded by the minority class's distinct-group count. Without groups, plain
-    stratified CV.
-
-    Returns None when the AUC is undefined: one class only, or too few per-class units for
-    >= 2 folds (LOQO needs >= 2 groups per class so no training fold is single-class).
-    """
+    train/test (the Confound-A deconfound). ``leave_one_group_out`` uses LeaveOneGroupOut (each
+    group held out once -- the paper's leave-one-QUESTION-out; the pooled OOF is well defined even
+    though each single-group test fold is one class); otherwise StratifiedGroupKFold bounded by
+    the minority class's distinct-group count. Without groups, plain stratified CV. None when
+    undefined: one class only, or too few per-class units for >= 2 folds."""
     from sklearn.linear_model import LogisticRegression
     from sklearn.preprocessing import StandardScaler
 
@@ -146,9 +144,8 @@ def _cv_probe_auc(
 
     g = np.asarray(groups) if groups is not None else None
     # LOQO must NOT silently degrade to plain CV: if leave-one-question-out is requested but the
-    # corpus is not grouped (< 2 distinct groups), refuse (return None) rather than leak
-    # same-question trajectories across folds -- which would inflate the AUC under a label that
-    # still claims "leave-one-question-out".
+    # corpus is not grouped (< 2 distinct groups), refuse rather than leak same-question
+    # trajectories across folds (which would inflate the AUC under a leave-one-question-out label).
     if leave_one_group_out and (g is None or np.unique(g).size < 2):
         return None
     if g is not None and np.unique(g).size >= 2:
@@ -178,11 +175,36 @@ def _cv_probe_auc(
     oof = np.full(y.shape[0], np.nan, dtype=np.float64)
     for train_idx, test_idx in split:
         scaler = StandardScaler().fit(features[train_idx])
-        clf = LogisticRegression(C=c, max_iter=1000).fit(
+        clf = LogisticRegression(C=c, max_iter=1000, class_weight=class_weight).fit(
             scaler.transform(features[train_idx]), y[train_idx]
         )
         oof[test_idx] = clf.predict_proba(scaler.transform(features[test_idx]))[:, 1]
-    return roc_auc(oof, y)
+    return oof, y
+
+
+def _cv_probe_auc(
+    features: Array,
+    labels: NDArray[np.int_],
+    *,
+    folds: int = 5,
+    seed: int = 0,
+    c: float = 1.0,
+    class_weight: str | None = None,
+    groups: Sequence[str] | None = None,
+    leave_one_group_out: bool = False,
+) -> float | None:
+    """Pooled out-of-fold ROC-AUC of a standardized L2 logistic probe (see ``_pooled_oof``)."""
+    res = _pooled_oof(
+        features,
+        labels,
+        folds=folds,
+        seed=seed,
+        c=c,
+        class_weight=class_weight,
+        groups=groups,
+        leave_one_group_out=leave_one_group_out,
+    )
+    return None if res is None else roc_auc(res[0], res[1])
 
 
 def _transfer_auc(
@@ -304,16 +326,21 @@ class CorrectnessResult:
     """Kinematics-predict-correctness under the paper's two protocols (arXiv:2607.01571 s5.2),
     each with ROC-AUC and AUPRC (the paper leads with AUPRC -- can we RANK correct trajectories
     above incorrect ones?). ``within`` is 5-fold CV over all pooled trajectories (trajectories of
-    a question may straddle folds -- the ceiling, the paper's ~0.90); ``cross`` is a
-    question-level 80/20 split averaged over 5 seeds (no question in both train and test -- the
-    universally-transferable signal, the paper's ~0.806). The within-cross gap is the portion of
-    the signal that is question-specific. None when undefined (single class, or < 2 groups for
-    the cross protocol)."""
+    a question may straddle folds -- the ceiling, the paper's ~0.90); ``cross`` is the mean over
+    5 question-grouped 80/20 splits (GroupShuffleSplit; the paper's "x5"; no question in both
+    train and test -- the universally-transferable signal, the paper's ~0.806). The within-cross
+    gap is the question-specific portion of the signal. Classifier: LR C=0.1 balanced (the
+    paper's), deliberately NOT the pre-registered kill2 probe. None when undefined (single class,
+    or < 2 groups for the cross protocol)."""
 
     within_auc: float | None
     within_auprc: float | None
     cross_auc: float | None
     cross_auprc: float | None
+    # fraction of trajectories labeled correct -- the AUPRC base rate. AUPRC is
+    # prevalence-dependent, so within/cross AUPRC are only interpretable (and only comparable
+    # across types/runs/the paper) against this. None for an empty type.
+    positive_rate: float | None
 
 
 @dataclass(frozen=True)
@@ -338,10 +365,13 @@ class FloorTestReport:
     # and is sparse -- present only for types where the 1-vs-5 probe was computed.
     drho_per_threshold: dict[str, dict[float, float | None]]
     drho_1v5_per_threshold: dict[str, dict[float, float | None]]
-    kinematics_correctness: dict[str, float | None]  # task_type -> within-question AUC (kill #2)
-    # task_type -> the paper's within/cross correctness AUC+AUPRC (arXiv:2607.01571 s5.2). The
-    # within-cross gap is the question-specific portion of the signal; kinematics_correctness is
-    # the same number as correctness[ty].within_auc.
+    # task_type -> kill #2 AUC: the repo's PRE-REGISTERED within-question kinematics->correct probe
+    # (C=1.0), whose 0.70 threshold was calibrated on this classifier. Distinct from -- and not
+    # equal to -- correctness[ty].within_auc, which uses the PAPER'S classifier (C=0.1 balanced).
+    kinematics_correctness: dict[str, float | None]
+    # task_type -> the paper's within/cross correctness AUC+AUPRC (arXiv:2607.01571 s5.2), for
+    # direct comparison to the paper's 0.90/0.806. The within-cross gap is the question-specific
+    # portion of the signal.
     correctness: dict[str, CorrectnessResult]
     cross_transfer: dict[str, float | None]  # "A->B" -> AUC (geometry transfer)
     # length-confound control (issues #7): task_type -> kind ("correctness"/"difficulty")
@@ -372,15 +402,15 @@ class FloorTestReport:
                     lines.append(f"  {ty}: AUC={_fmt_auc(auc)} ({q} extreme-level questions)")
         if any(cr.within_auc is not None for cr in self.correctness.values()):
             lines.append("")
-            lines.append(
-                "correctness (kinematics): within-question vs cross-question (AUC / AUPRC):"
-            )
+            lines.append("correctness (kinematics, paper LR C=0.1): within vs cross (AUC / AUPRC):")
             for ty, cr in self.correctness.items():
                 if cr.within_auc is None and cr.cross_auc is None:
                     continue
+                base = "n/a" if cr.positive_rate is None else f"{cr.positive_rate:.2f}"
                 lines.append(
                     f"  {ty}: within AUC={_fmt_auc(cr.within_auc)} AUPRC={_fmt_auc(cr.within_auprc)}"
                     f" | cross AUC={_fmt_auc(cr.cross_auc)} AUPRC={_fmt_auc(cr.cross_auprc)}"
+                    f" | correct-rate={base} (AUPRC base)"
                 )
         lines.append("")
         lines.append("#7 kill conditions:")
@@ -482,33 +512,36 @@ def _correctness_result(
     c: float = 0.1,
 ) -> CorrectnessResult:
     """The paper's two correctness protocols (arXiv:2607.01571 s5.2), each with ROC-AUC + AUPRC.
-    Classifier: standardized logistic regression, C=0.1, balanced class weights (App. B).
+    Classifier: standardized logistic regression, C=0.1, balanced class weights (App. B) -- the
+    PAPER'S classifier, so these numbers compare to the paper's 0.90/0.806. It is deliberately NOT
+    the repo's pre-registered kill2 probe (``_cv_probe_auc``, C=1.0), whose 0.70 threshold was
+    calibrated on that classifier; this is a separate paper-comparison diagnostic.
 
     ``within`` -- pooled out-of-fold 5-fold over ALL trajectories (a question's trajectories may
-    straddle folds; the ceiling). ``cross`` -- question-grouped 80/20 split over 5 seeds, mean of
-    the per-split metrics (no question in both train and test; the transferable signal). ``cross``
-    needs >= 2 groups and both classes; either is None when undefined."""
+    straddle folds; the ceiling). ``cross`` -- 5 question-grouped 80/20 splits (GroupShuffleSplit,
+    the paper's "x5"), mean of the per-split metrics; no question in both train and test (the
+    transferable signal). ``cross`` needs >= 2 groups and both classes; either is None when
+    undefined. ``positive_rate`` (the fraction correct) is recorded because AUPRC is
+    prevalence-dependent -- an AUPRC is only interpretable against its base rate."""
     from sklearn.linear_model import LogisticRegression
-    from sklearn.model_selection import GroupShuffleSplit, StratifiedKFold
+    from sklearn.model_selection import GroupShuffleSplit
     from sklearn.preprocessing import StandardScaler
 
+    positive_rate = float(np.mean(y)) if y.size else None
+
+    # within-question: the shared pooled-OOF engine with the paper's classifier
+    within_auc = within_auprc = None
+    res = _pooled_oof(features, y, folds=folds, seed=seed, c=c, class_weight="balanced")
+    if res is not None:
+        within_auc, within_auprc = _auc_auprc(res[0], res[1])
+
+    # cross-question: 5 grouped 80/20 splits, mean of per-split metrics
     def _fit_predict(tr: NDArray[np.int_], te: NDArray[np.int_]) -> Array:
         scaler = StandardScaler().fit(features[tr])
         clf = LogisticRegression(C=c, max_iter=1000, class_weight="balanced").fit(
             scaler.transform(features[tr]), y[tr]
         )
         return np.asarray(clf.predict_proba(scaler.transform(features[te]))[:, 1])
-
-    within_auc = within_auprc = None
-    if np.unique(y).size >= 2:
-        n_splits = min(folds, int(np.bincount(y).min()))
-        if n_splits >= 2:
-            oof = np.full(y.shape[0], np.nan, dtype=np.float64)
-            for tr, te in StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed).split(
-                features, y
-            ):
-                oof[te] = _fit_predict(tr, te)
-            within_auc, within_auprc = _auc_auprc(oof, y)
 
     cross_auc = cross_auprc = None
     g = np.asarray(groups) if groups is not None else None
@@ -527,7 +560,7 @@ def _correctness_result(
         if aucs:
             cross_auc = float(np.mean(aucs))
             cross_auprc = float(np.mean(auprcs))
-    return CorrectnessResult(within_auc, within_auprc, cross_auc, cross_auprc)
+    return CorrectnessResult(within_auc, within_auprc, cross_auc, cross_auprc, positive_rate)
 
 
 def _length_control(
@@ -603,11 +636,14 @@ def evaluate_floor_test(
         drho_x = np.array([drho_features(t.metrics) for t in group])
         kin_x = np.array([kinematic_features(t.metrics) for t in group])
         drho_probe[ty] = _cv_probe_auc(drho_x, yh, seed=seed, groups=task_groups)
-        # Correctness (kill #2), the paper's two protocols + AUPRC (LR C=0.1 balanced): `within`
-        # pooled 5-fold, `cross` question-grouped 80/20 x5 (task_groups keep a question out of
-        # both sides of the split). kill2 / the length control read the within-question AUC.
+        # kill #2 keeps the repo's PRE-REGISTERED probe (C=1.0), so its 0.70 threshold calibration
+        # is unchanged; the length control (below) shares this classifier for a clean geom-vs-
+        # length comparison.
+        kin_probe[ty] = _cv_probe_auc(kin_x, yc, seed=seed)
+        # ...and the PAPER'S protocols (within/cross, AUPRC, LR C=0.1 balanced) are reported
+        # ALONGSIDE as a faithful comparison to the paper's 0.90/0.806. `cross` groups by question
+        # (task_groups) so no question spans the 80/20 split.
         correctness[ty] = _correctness_result(kin_x, yc, task_groups, seed=seed)
-        kin_probe[ty] = correctness[ty].within_auc
 
         # 1-vs-5 difficulty (arXiv:2607.01571): the difficulty EXTREMES only (drop "medium"
         # level 3, which the binary `hard` flag would lump with easy), labeled by the hard
@@ -873,6 +909,7 @@ def report_to_dict(r: FloorTestReport) -> dict[str, Any]:
                 "within_auprc": cr.within_auprc,
                 "cross_auc": cr.cross_auc,
                 "cross_auprc": cr.cross_auprc,
+                "positive_rate": cr.positive_rate,
             }
             for ty, cr in r.correctness.items()
         },

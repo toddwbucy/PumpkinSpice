@@ -215,10 +215,13 @@ def test_correctness_within_and_cross() -> None:
     assert cr.within_auc is not None and cr.within_auc > 0.85
     assert cr.cross_auc is not None and cr.cross_auc > 0.85
     assert cr.within_auprc is not None and cr.cross_auprc is not None
-    # kill2 / kinematics_correctness == the within-question AUC
-    assert report.kinematics_correctness["reasoning"] == cr.within_auc
+    # AUPRC base rate recorded (prevalence-dependent metric); ~0.5 for this balanced corpus
+    assert cr.positive_rate is not None and 0.3 < cr.positive_rate < 0.7
+    # kill2 stays the PRE-REGISTERED probe (C=1.0), computed independently of the paper diagnostic
+    # (on this perfectly-separable corpus both classifiers reach the ceiling, so don't assert !=)
+    assert report.kinematics_correctness["reasoning"] is not None
     assert next(k for k in report.kills_hash7 if k.name.startswith("kill2")).passed is True
-    assert "correctness" in report_to_dict(report)
+    assert report_to_dict(report)["correctness"]["reasoning"]["positive_rate"] is not None
 
 
 def test_correctness_cross_none_when_ungrouped() -> None:
