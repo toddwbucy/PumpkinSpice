@@ -300,6 +300,23 @@ class LengthControl:
 
 
 @dataclass(frozen=True)
+class CorrectnessResult:
+    """Kinematics-predict-correctness under the paper's two protocols (arXiv:2607.01571 s5.2),
+    each with ROC-AUC and AUPRC (the paper leads with AUPRC -- can we RANK correct trajectories
+    above incorrect ones?). ``within`` is 5-fold CV over all pooled trajectories (trajectories of
+    a question may straddle folds -- the ceiling, the paper's ~0.90); ``cross`` is a
+    question-level 80/20 split averaged over 5 seeds (no question in both train and test -- the
+    universally-transferable signal, the paper's ~0.806). The within-cross gap is the portion of
+    the signal that is question-specific. None when undefined (single class, or < 2 groups for
+    the cross protocol)."""
+
+    within_auc: float | None
+    within_auprc: float | None
+    cross_auc: float | None
+    cross_auprc: float | None
+
+
+@dataclass(frozen=True)
 class FloorTestReport:
     n_by_type: dict[str, int]
     # Effective independent-unit count for the DIFFICULTY probe: distinct task-groups per
@@ -321,7 +338,11 @@ class FloorTestReport:
     # and is sparse -- present only for types where the 1-vs-5 probe was computed.
     drho_per_threshold: dict[str, dict[float, float | None]]
     drho_1v5_per_threshold: dict[str, dict[float, float | None]]
-    kinematics_correctness: dict[str, float | None]  # task_type -> CV probe AUC
+    kinematics_correctness: dict[str, float | None]  # task_type -> within-question AUC (kill #2)
+    # task_type -> the paper's within/cross correctness AUC+AUPRC (arXiv:2607.01571 s5.2). The
+    # within-cross gap is the question-specific portion of the signal; kinematics_correctness is
+    # the same number as correctness[ty].within_auc.
+    correctness: dict[str, CorrectnessResult]
     cross_transfer: dict[str, float | None]  # "A->B" -> AUC (geometry transfer)
     # length-confound control (issues #7): task_type -> kind ("correctness"/"difficulty")
     # -> geometry vs length. cross_transfer_length is the kill3 length baseline: the same
@@ -349,6 +370,18 @@ class FloorTestReport:
                 if auc is not None:
                     q = self.n_1v5_groups_by_type.get(ty, 0)
                     lines.append(f"  {ty}: AUC={_fmt_auc(auc)} ({q} extreme-level questions)")
+        if any(cr.within_auc is not None for cr in self.correctness.values()):
+            lines.append("")
+            lines.append(
+                "correctness (kinematics): within-question vs cross-question (AUC / AUPRC):"
+            )
+            for ty, cr in self.correctness.items():
+                if cr.within_auc is None and cr.cross_auc is None:
+                    continue
+                lines.append(
+                    f"  {ty}: within AUC={_fmt_auc(cr.within_auc)} AUPRC={_fmt_auc(cr.within_auprc)}"
+                    f" | cross AUC={_fmt_auc(cr.cross_auc)} AUPRC={_fmt_auc(cr.cross_auprc)}"
+                )
         lines.append("")
         lines.append("#7 kill conditions:")
         for kc in self.kills_hash7:
@@ -429,6 +462,74 @@ def _validate_corpus(turns: list[LabeledTurn]) -> None:
         )
 
 
+def _auc_auprc(scores: Array, y: NDArray[np.int_]) -> tuple[float | None, float | None]:
+    """ROC-AUC (rank-based) and AUPRC (average precision) of ``scores`` vs binary ``y``.
+    (None, None) if ``y`` is single-class or ``scores`` has a NaN (an incompletely filled OOF)."""
+    from sklearn.metrics import average_precision_score
+
+    if np.unique(y).size < 2 or not np.isfinite(scores).all():
+        return None, None
+    return roc_auc(scores, y), float(average_precision_score(y, scores))
+
+
+def _correctness_result(
+    features: Array,
+    y: NDArray[np.int_],
+    groups: Sequence[str] | None,
+    *,
+    seed: int,
+    folds: int = 5,
+    c: float = 0.1,
+) -> CorrectnessResult:
+    """The paper's two correctness protocols (arXiv:2607.01571 s5.2), each with ROC-AUC + AUPRC.
+    Classifier: standardized logistic regression, C=0.1, balanced class weights (App. B).
+
+    ``within`` -- pooled out-of-fold 5-fold over ALL trajectories (a question's trajectories may
+    straddle folds; the ceiling). ``cross`` -- question-grouped 80/20 split over 5 seeds, mean of
+    the per-split metrics (no question in both train and test; the transferable signal). ``cross``
+    needs >= 2 groups and both classes; either is None when undefined."""
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.model_selection import GroupShuffleSplit, StratifiedKFold
+    from sklearn.preprocessing import StandardScaler
+
+    def _fit_predict(tr: NDArray[np.int_], te: NDArray[np.int_]) -> Array:
+        scaler = StandardScaler().fit(features[tr])
+        clf = LogisticRegression(C=c, max_iter=1000, class_weight="balanced").fit(
+            scaler.transform(features[tr]), y[tr]
+        )
+        return np.asarray(clf.predict_proba(scaler.transform(features[te]))[:, 1])
+
+    within_auc = within_auprc = None
+    if np.unique(y).size >= 2:
+        n_splits = min(folds, int(np.bincount(y).min()))
+        if n_splits >= 2:
+            oof = np.full(y.shape[0], np.nan, dtype=np.float64)
+            for tr, te in StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed).split(
+                features, y
+            ):
+                oof[te] = _fit_predict(tr, te)
+            within_auc, within_auprc = _auc_auprc(oof, y)
+
+    cross_auc = cross_auprc = None
+    g = np.asarray(groups) if groups is not None else None
+    if g is not None and np.unique(g).size >= 2 and np.unique(y).size >= 2:
+        aucs: list[float] = []
+        auprcs: list[float] = []
+        for tr, te in GroupShuffleSplit(n_splits=5, test_size=0.2, random_state=seed).split(
+            features, y, groups=g
+        ):
+            if np.unique(y[tr]).size < 2 or np.unique(y[te]).size < 2:
+                continue  # a single-class train or test split is uninformative
+            a, p = _auc_auprc(_fit_predict(tr, te), y[te])
+            if a is not None and p is not None:
+                aucs.append(a)
+                auprcs.append(p)
+        if aucs:
+            cross_auc = float(np.mean(aucs))
+            cross_auprc = float(np.mean(auprcs))
+    return CorrectnessResult(within_auc, within_auprc, cross_auc, cross_auprc)
+
+
 def _length_control(
     feat_x: Array,
     lengths: list[float],
@@ -488,6 +589,7 @@ def evaluate_floor_test(
     drho_pt: dict[str, dict[float, float | None]] = {}
     drho_1v5_pt: dict[str, dict[float, float | None]] = {}  # sparse: only types where 1v5 ran
     kin_probe: dict[str, float | None] = {}
+    correctness: dict[str, CorrectnessResult] = {}
     length_control: dict[str, dict[str, LengthControl]] = {}
     for ty, group in grouped.items():
         hard = [t.hard for t in group]
@@ -501,7 +603,11 @@ def evaluate_floor_test(
         drho_x = np.array([drho_features(t.metrics) for t in group])
         kin_x = np.array([kinematic_features(t.metrics) for t in group])
         drho_probe[ty] = _cv_probe_auc(drho_x, yh, seed=seed, groups=task_groups)
-        kin_probe[ty] = _cv_probe_auc(kin_x, yc, seed=seed)
+        # Correctness (kill #2), the paper's two protocols + AUPRC (LR C=0.1 balanced): `within`
+        # pooled 5-fold, `cross` question-grouped 80/20 x5 (task_groups keep a question out of
+        # both sides of the split). kill2 / the length control read the within-question AUC.
+        correctness[ty] = _correctness_result(kin_x, yc, task_groups, seed=seed)
+        kin_probe[ty] = correctness[ty].within_auc
 
         # 1-vs-5 difficulty (arXiv:2607.01571): the difficulty EXTREMES only (drop "medium"
         # level 3, which the binary `hard` flag would lump with easy), labeled by the hard
@@ -593,6 +699,7 @@ def evaluate_floor_test(
         drho_per_threshold=drho_pt,
         drho_1v5_per_threshold=drho_1v5_pt,
         kinematics_correctness=kin_probe,
+        correctness=correctness,
         cross_transfer=cross,
         length_control=length_control,
         cross_transfer_length=cross_length,
@@ -760,6 +867,15 @@ def report_to_dict(r: FloorTestReport) -> dict[str, Any]:
             ty: {str(k): v for k, v in d.items()} for ty, d in r.drho_1v5_per_threshold.items()
         },
         "kinematics_correctness": r.kinematics_correctness,
+        "correctness": {
+            ty: {
+                "within_auc": cr.within_auc,
+                "within_auprc": cr.within_auprc,
+                "cross_auc": cr.cross_auc,
+                "cross_auprc": cr.cross_auprc,
+            }
+            for ty, cr in r.correctness.items()
+        },
         "cross_transfer": r.cross_transfer,
         "length_control": {
             ty: {
