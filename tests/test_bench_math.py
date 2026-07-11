@@ -200,6 +200,69 @@ def test_run_math_benchmark_grades_and_labels(tmp_path) -> None:  # type: ignore
     assert by_level[2].outcome["truncated"] is False
 
 
+def test_build_prompt_styles() -> None:
+    from pumpkinspice.introspect.bench_math import COT_STYLES, build_prompt
+
+    default = build_prompt("2+2?")
+    assert "Solve the following" in default and "2+2?" in default  # repo's single-pass prompt
+    medium = build_prompt("2+2?", style="medium")
+    assert medium.startswith("Think step by step") and "2+2?" in medium
+    long = build_prompt("2+2?", style="long")
+    assert "Overthink this" in long and "second-guess" in long and "2+2?" in long
+    assert set(COT_STYLES) == {"medium", "long", "short"}
+    with pytest.raises(ValueError, match="unknown prompt style"):
+        build_prompt("x", style="bogus")
+
+
+def test_run_math_multisample_per_trajectory(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import httpx
+
+    from pumpkinspice.introspect.bench_math import run_math_multisample
+
+    _write_math(tmp_path, "Algebra", "1.json", problem="2+2?", level=3, solution=r"\boxed{4}")
+    problems = load_math_dir(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "m", "max_model_len": 4096}]})
+        body = json.loads(request.content)
+        seed = int(body.get("seed", 0))
+        # faithful sampling: only temperature+seed overridden; top_k/top_p come from vLLM's
+        # greedy defaults (all tokens / no nucleus) -- never the rejected top_k=0 or a 0.95 nucleus
+        assert body.get("temperature") == 0.7
+        assert body.get("top_k") == -1 and body.get("top_p") == 1
+        ctok = 5 if seed == 0 else 50  # seed 0 -> too-short trajectory (dropped)
+        ans = "4" if seed % 2 == 0 else "5"  # even seeds correct, odd wrong -> correctness varies
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": rf"work \boxed{{{ans}}}"}, "finish_reason": "stop"}
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": ctok},
+            },
+        )
+
+    d = _vllm_mock(handler)
+    cap = _MemCapture()
+    turns = run_math_multisample(
+        d, problems, cap, styles=("medium", "long"), samples_per_style=3, min_tokens=30
+    )
+
+    # 2 styles x 3 samples = 6 jobs (seeds 0..5); seed 0 is < 30 tokens -> dropped -> 5 kept
+    assert len(turns) == 5 and len(cap.turns) == 5
+    # every trajectory groups on the QUESTION (for question-level held-out CV) ...
+    assert all(t.task == problems[0].problem_id for t in turns)
+    # ... and records which style + sample it is, symmetrically in world_state AND outcome
+    assert {t.world_state["style"] for t in turns} <= {"medium", "long"}
+    assert all("sample" in t.world_state and "sample" in t.outcome for t in turns)
+    assert all("style" in t.world_state and "style" in t.outcome for t in turns)
+    # distinct reproducible seeds per trajectory (provenance)
+    assert len({t.decode.get("seed") for t in turns}) == 5
+    # the whole point: correctness has variance to predict (a mix of right and wrong)
+    assert {t.outcome["correct"] for t in turns} == {True, False}
+
+
 def _vllm_mock(handler):  # type: ignore[no-untyped-def]
     import httpx
 

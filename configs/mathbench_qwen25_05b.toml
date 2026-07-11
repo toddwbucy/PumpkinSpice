@@ -1,0 +1,33 @@
+# Floor-test reasoning arm -- faithful replication of Masoomi et al., "Geometric Signatures of
+# Reasoning" (arXiv:2607.01571): Qwen2.5-0.5B-Instruct multi-sampled over the MATH500 3-category
+# corpus (seed_math500.py). The paper draws 10-15 trajectories per question at T=0.7 across two
+# CoT styles (medium + long), capped at 800 tokens, dropping trajectories under 30 tokens.
+#
+# Serve the 0.5B via vLLM (tiny -- a single GPU is ample; put it on the idle card so a larger
+# model can stay resident on the others):
+#   CUDA_VISIBLE_DEVICES=2 vllm serve Qwen/Qwen2.5-0.5B-Instruct --port 8002 \
+#       --max-model-len 4096 --gpu-memory-utilization 0.5
+#
+# Run (10 samples/style x 2 styles = 20 trajectories/question, T=0.7, 800-cap, min-30 tok):
+#   pumpkinspice mathbench -c configs/mathbench_qwen25_05b.toml \
+#       --data-dir ~/olympus/Data/benchmarks/math500_json --levels 1,3,5 \
+#       --samples 10 --styles medium,long --temperature 0.7 --concurrency 16 \
+#       -o captures/math_qwen25_05b_multisample.jsonl
+
+[run]
+decoder   = "vllm"
+retrieval = "null"
+world     = "mock"
+prompt    = "default"
+capture   = "jsonl"
+
+[decoder]
+base_url   = "http://127.0.0.1:8002"
+model      = "Qwen/Qwen2.5-0.5B-Instruct"
+# The paper's 800-token cap on each trajectory (short traces from a small model; also the
+# length control -- trajectories are comparable rather than one model thinking to 32k).
+max_tokens = 800
+timeout    = 300
+# Precision provenance (Turn.model_info); the 0.5B loads unquantized bf16.
+quantization = "none"
+dtype        = "bfloat16"
