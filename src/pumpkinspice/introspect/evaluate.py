@@ -272,9 +272,10 @@ class LengthControl:
     length alone often predicts correctness/difficulty (harder/failing problems get more
     tokens). ``d_rho`` and the kinematics are length-sensitive, so a geometry AUC can be
     largely a length artifact. Three AUCs on the SAME labels (keyed in the report by task
-    type then kind, so ``geometry_auc`` is the corresponding probe's AUC -- but note a
-    difficulty entry exists for every task type while kill1 is registered only for the
-    agentic type, so a non-agentic difficulty entry maps to no kill):
+    type then kind, so ``geometry_auc`` is the corresponding probe's AUC). Which difficulty
+    entry backs a kill depends on the arm: the ``difficulty`` entry (binary hard, full corpus)
+    backs kill1 for the AGENTIC arm; the ``difficulty_1v5`` entry (extreme levels only) backs
+    kill1_drho_1v5 for any arm with both extremes (e.g. the reasoning arm):
       * ``geometry_auc``  -- the geometry features (kinematics for correctness, d_rho for
         difficulty),
       * ``length_auc``    -- the span length alone, a deterministic single-feature AUC,
@@ -315,7 +316,11 @@ class FloorTestReport:
     # task_type -> d_rho 1-vs-5 difficulty AUC (paper protocol: extreme levels only,
     # leave-one-question-out). None when a type lacks both extremes (e.g. the agentic arm).
     drho_1v5: dict[str, float | None]
+    # per-threshold single-feature AUCs. drho_per_threshold decomposes drho_hard_easy (full
+    # corpus, binary hard); drho_1v5_per_threshold decomposes drho_1v5 (extreme subset, 1-vs-5)
+    # and is sparse -- present only for types where the 1-vs-5 probe was computed.
     drho_per_threshold: dict[str, dict[float, float | None]]
+    drho_1v5_per_threshold: dict[str, dict[float, float | None]]
     kinematics_correctness: dict[str, float | None]  # task_type -> CV probe AUC
     cross_transfer: dict[str, float | None]  # "A->B" -> AUC (geometry transfer)
     # length-confound control (issues #7): task_type -> kind ("correctness"/"difficulty")
@@ -481,6 +486,7 @@ def evaluate_floor_test(
     drho_1v5: dict[str, float | None] = {}
     n_1v5_groups_by_type: dict[str, int] = {}
     drho_pt: dict[str, dict[float, float | None]] = {}
+    drho_1v5_pt: dict[str, dict[float, float | None]] = {}  # sparse: only types where 1v5 ran
     kin_probe: dict[str, float | None] = {}
     length_control: dict[str, dict[str, LengthControl]] = {}
     for ty, group in grouped.items():
@@ -507,7 +513,6 @@ def evaluate_floor_test(
         n_1v5_groups_by_type[ty] = len({t.group for t in extreme})
         drho_1v5[ty] = None
         ex_lc: LengthControl | None = None
-        ex_drho_pt: dict[float, float | None] | None = None
         if len({t.level for t in extreme}) >= 2:
             ex_x = np.array([drho_features(t.metrics) for t in extreme])
             ex_hard = [t.level == hard_lvl for t in extreme]
@@ -517,7 +522,8 @@ def evaluate_floor_test(
             auc = _cv_probe_auc(ex_x, ex_y, seed=seed, groups=ex_g, leave_one_group_out=True)
             drho_1v5[ty] = auc
             if auc is not None:
-                ex_drho_pt = {
+                # per-threshold decomposition of the 1-vs-5 headline (its OWN subset+label)
+                drho_1v5_pt[ty] = {
                     rho: _single_feature_auc(
                         [float(t.metrics.d_rho[rho]) for t in extreme], ex_hard
                     )
@@ -534,17 +540,14 @@ def evaluate_floor_test(
                     leave_one_group_out=True,
                 )
 
-        # Per-threshold single-feature AUCs decompose the HEADLINE difficulty probe: the 1-vs-5
-        # extreme subset+label when that probe was computed (reasoning arm), else the binary-hard
-        # full corpus (agentic arm, which has no levels).
-        drho_pt[ty] = (
-            ex_drho_pt
-            if ex_drho_pt is not None
-            else {
-                rho: _single_feature_auc([float(t.metrics.d_rho[rho]) for t in group], hard)
-                for rho in thresholds
-            }
-        )
+        # Per-threshold single-feature AUCs of the FULL-corpus binary-hard difficulty probe --
+        # the decomposition OF drho_hard_easy[ty], so the two always describe the same subset+
+        # label. The 1-vs-5 headline has its own drho_1v5_per_threshold (set above) so neither
+        # can be misread as the other's breakdown.
+        drho_pt[ty] = {
+            rho: _single_feature_auc([float(t.metrics.d_rho[rho]) for t in group], hard)
+            for rho in thresholds
+        }
 
         # Does geometry beat length? Built in one place (_length_control) for every kind.
         length_control[ty] = {
@@ -588,6 +591,7 @@ def evaluate_floor_test(
         drho_hard_easy=drho_probe,
         drho_1v5=drho_1v5,
         drho_per_threshold=drho_pt,
+        drho_1v5_per_threshold=drho_1v5_pt,
         kinematics_correctness=kin_probe,
         cross_transfer=cross,
         length_control=length_control,
@@ -751,6 +755,9 @@ def report_to_dict(r: FloorTestReport) -> dict[str, Any]:
         "drho_1v5": r.drho_1v5,
         "drho_per_threshold": {
             ty: {str(k): v for k, v in d.items()} for ty, d in r.drho_per_threshold.items()
+        },
+        "drho_1v5_per_threshold": {
+            ty: {str(k): v for k, v in d.items()} for ty, d in r.drho_1v5_per_threshold.items()
         },
         "kinematics_correctness": r.kinematics_correctness,
         "cross_transfer": r.cross_transfer,

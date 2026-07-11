@@ -127,6 +127,12 @@ def test_drho_1v5_difficulty_probe() -> None:
     # the 1-vs-5 unit count is the EXTREME questions (8), smaller than all 1/3/5 questions (12)
     assert report.n_1v5_groups_by_type["reasoning"] == 8
     assert report.n_groups_by_type["reasoning"] == 12
+    # each headline has its OWN per-threshold: drho_per_threshold decomposes drho_hard_easy
+    # (full corpus), drho_1v5_per_threshold decomposes drho_1v5 (extreme subset) -- both present
+    assert set(report.drho_per_threshold["reasoning"]) == set(
+        report.drho_1v5_per_threshold["reasoning"]
+    )
+    assert "reasoning" in report.drho_1v5_per_threshold
 
 
 def test_drho_1v5_refuses_when_ungrouped() -> None:
