@@ -124,6 +124,61 @@ def test_drho_1v5_difficulty_probe() -> None:
     # the length control on the 1-vs-5 subset is reported, and drho_1v5 serializes
     assert "difficulty_1v5" in report.length_control["reasoning"]
     assert "drho_1v5" in report_to_dict(report)
+    # the 1-vs-5 unit count is the EXTREME questions (8), smaller than all 1/3/5 questions (12)
+    assert report.n_1v5_groups_by_type["reasoning"] == 8
+    assert report.n_groups_by_type["reasoning"] == 12
+
+
+def test_drho_1v5_refuses_when_ungrouped() -> None:
+    # LOQO requested but the corpus is not grouped per-question -> must REFUSE (None), never
+    # silently fall back to leaky plain CV while still claiming "leave-one-question-out".
+    rng = np.random.default_rng(0)
+    turns: list[LabeledTurn] = []
+    for level in (1, 5):
+        base = level
+        for _ in range(10):
+            dval = int(rng.integers(base, base + 2))
+            turns.append(
+                LabeledTurn(
+                    "reasoning",
+                    True,
+                    level >= 4,
+                    _metrics(mean_speed=1.0, drho=(dval, dval, dval)),
+                    level=level,
+                )
+            )  # group defaults to "" -> ungrouped
+    report = evaluate_floor_test(turns)
+    assert report.drho_1v5["reasoning"] is None  # refused, not a leaky estimate
+    assert not any(k.name.startswith("kill1_drho_1v5") for k in report.kills_hash7)
+    assert "difficulty_1v5" not in report.length_control["reasoning"]
+
+
+def test_drho_1v5_no_orphan_length_control() -> None:
+    # both extremes present but only 1 question at level 1 -> per_class_groups=1 -> probe None;
+    # there must be NO difficulty_1v5 length control (a length AUC with no geometry).
+    rng = np.random.default_rng(0)
+    turns: list[LabeledTurn] = []
+
+    def add(q: str, level: int) -> None:
+        for _ in range(5):
+            dval = int(rng.integers(level, level + 2))
+            turns.append(
+                LabeledTurn(
+                    "reasoning",
+                    True,
+                    level >= 4,
+                    _metrics(mean_speed=1.0, drho=(dval, dval, dval)),
+                    group=q,
+                    level=level,
+                )
+            )
+
+    add("q1", 1)  # only ONE level-1 question
+    for q in ("q2", "q3", "q4"):
+        add(q, 5)
+    report = evaluate_floor_test(turns)
+    assert report.drho_1v5["reasoning"] is None  # per_class_groups=1 -> undefined
+    assert "difficulty_1v5" not in report.length_control["reasoning"]  # no orphan control
 
 
 def test_drho_1v5_absent_without_levels() -> None:

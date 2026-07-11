@@ -137,8 +137,10 @@ def replay_captures(
             # Per-question grouping (multi-sample MATH): the row's own task id, else the file group.
             grp = str(turn.get("task")) if (group_by == "task" and turn.get("task")) else file_grp
             # Raw difficulty level for the 1-vs-5 difficulty probe (0 when absent, e.g. HeroBench).
+            # `outcome` may be a non-dict (a list, or None) -> isinstance guard, then coerce.
+            oc = turn.get("outcome")
             try:
-                level = int((turn.get("outcome") or {}).get("level") or 0)
+                level = int(oc.get("level") or 0) if isinstance(oc, dict) else 0
             except (TypeError, ValueError):
                 level = 0
             row = labeled_turn_to_dict(
